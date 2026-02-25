@@ -4,31 +4,33 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.5
+# Version: 1.1.6
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
 #
 # Features:
 #   - Universal AMD GPU support (Polaris, Vega, RDNA 1/2/3)
-#   - Automatic dependency installation
-#   - Multi-distribution support
+#   - Automatic dependency installation (including bc calculator)
+#   - Multi-distribution support (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE)
 #   - AMD GPU detection and VA-API/AMF support
 #   - AV1 encoding support for RDNA 3
 #   - Smart B-frame management per GPU architecture
-#   - Zero-copy hardware pipeline
+#   - Zero-copy hardware pipeline (fixed VA-API command construction)
 #   - HQVBR for consistent quality
 #   - Advanced VOB/DVD format support with forced processing
-#   - Flexible output format specification (to mkv, to mp4, to avi)
-#   - Format auto-detection from output extension
-#   - Smart container validation
+#   - Flexible output formats: to mp4, to mkv, to avi
+#   - Auto-detection from command line
+#   - Comprehensive dependency checking with clear installation notes
 #
 # Changelog:
-#   v1.1.5 - Added support for "to [format]" syntax
-#          - Auto-detection of output format from arguments
-#          - Smart container validation
-#          - Better format compatibility checking
-#          - Multiple output format presets
+#   v1.1.6 - Fixed VA-API command construction (duplicate -i flag)
+#          - Added bc dependency check and auto-install
+#          - Improved hardware pipeline with proper filter chain
+#          - Better error messages for missing dependencies
+#          - Added --check-deps flag to verify all requirements
+#          - Enhanced --install-deps to ensure bc is installed
+#   v1.1.5 - Added "to [format]" syntax support
 #   v1.1.4 - Fixed VOB file duration issues, added DVD preset
 #   v1.1.3 - Fixed VOB file duration parsing
 #   v1.1.2 - Fixed unbound variable errors
@@ -43,7 +45,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.5"
+VERSION="1.1.6"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -66,6 +68,10 @@ DEFAULT_QUALITY="balanced"
 DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
 INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob" "VOB")
+
+# Required dependencies
+REQUIRED_COMMANDS=("ffmpeg" "vainfo" "lspci" "bc" "ffprobe")
+REQUIRED_PACKAGES=("ffmpeg" "vainfo" "pciutils" "bc" "ffmpeg")
 
 # Supported output formats and their default codecs
 declare -A OUTPUT_FORMATS=(
@@ -226,10 +232,11 @@ print_banner() {
     echo -e "${CYAN}║   • Polaris (RX 400/500) • Vega • RDNA 1 • RDNA 2 • RDNA 3        ║${NC}"
     echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series                                ║${NC}"
     echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}"
-    echo -e "${CYAN}║   • Zero-copy hardware pipeline                                    ║${NC}"
+    echo -e "${CYAN}║   • Zero-copy hardware pipeline (fixed VA-API)                     ║${NC}"
     echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}"
     echo -e "${CYAN}║   • Flexible output formats: to mp4, to mkv, to avi                ║${NC}"
     echo -e "${CYAN}║   • Auto-detection from command line                               ║${NC}"
+    echo -e "${CYAN}║   • Automatic dependency installation (including bc)               ║${NC}"
     echo -e "${CYAN}║                                                                   ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 }
@@ -243,7 +250,8 @@ print_usage() {
     echo -e "    -v, --version           Show version information"
     echo -e "    -d, --debug             Enable debug output"
     echo -e "    --dry-run              Show commands without executing"
-    echo -e "    --install-deps         Install required dependencies"
+    echo -e "    --check-deps           Check if all dependencies are installed"
+    echo -e "    --install-deps         Install required dependencies (run as root)"
     echo -e "    --conf                 Interactive configuration menu"
     echo -e "    --save-conf NAME       Save current settings as profile"
     echo -e "    --load-conf NAME       Load profile"
@@ -297,6 +305,12 @@ print_usage() {
     echo -e "    --crop W:H:X:Y          Crop video (width:height:x:y)"
     echo
     echo -e "${GREEN}EXAMPLES:${NC}"
+    echo -e "    # Check dependencies first"
+    echo -e "    $SCRIPT_NAME --check-deps"
+    echo
+    echo -e "    # Install missing dependencies (requires sudo)"
+    echo -e "    sudo $SCRIPT_NAME --install-deps"
+    echo
     echo -e "    # Basic conversion with default MP4 output"
     echo -e "    $SCRIPT_NAME *.mkv"
     echo
@@ -306,14 +320,8 @@ print_usage() {
     echo -e "    # Convert VOB files to AVI with quality preset"
     echo -e "    $SCRIPT_NAME --force-process -p dvd *.VOB to avi"
     echo
-    echo -e "    # Convert to WebM with VP9 codec"
-    echo -e "    $SCRIPT_NAME *.mp4 to webm"
-    echo
-    echo -e "    # Interactive configuration menu"
-    echo -e "    $SCRIPT_NAME --conf"
-    echo
-    echo -e "    # AV1 encoding to MKV on RDNA 3 GPU"
-    echo -e "    $SCRIPT_NAME -c av1 -p maxquality video.mp4 to mkv"
+    echo -e "    # Dry run to see what would happen"
+    echo -e "    $SCRIPT_NAME --dry-run *.mp4 to mkv"
     echo
     echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}"
     echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability"
@@ -359,74 +367,507 @@ check_command() {
 }
 
 # ============================================
-# Format Detection and Validation
+# Dependency Checking & Installation
 # ============================================
 
-is_valid_output_format() {
-    local format="$1"
-    [[ -n "${OUTPUT_FORMATS[$format]:-}" ]]
-}
+check_dependencies() {
+    local missing=()
+    local available=()
 
-get_default_codec_for_format() {
-    local format="$1"
-    echo "${OUTPUT_FORMATS[$format]:-h264}"
-}
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                    Dependency Check                               ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 
-validate_codec_for_format() {
-    local codec="$1"
-    local format="$2"
-
-    if [[ -n "${FORMAT_COMPATIBILITY[$format]:-}" ]]; then
-        if echo "${FORMAT_COMPATIBILITY[$format]}" | grep -qw "$codec"; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-detect_output_format_from_args() {
-    local args=("$@")
-    local format=""
-    local to_index=-1
-
-    # Find "to" keyword
-    for i in "${!args[@]}"; do
-        if [[ "${args[$i]}" == "to" ]] && [[ $i -lt $((${#args[@]} - 1)) ]]; then
-            to_index=$i
-            format="${args[$((i+1))]}"
-            break
+    for cmd in "${REQUIRED_COMMANDS[@]}"; do
+        if check_command "$cmd"; then
+            available+=("$cmd")
+            echo -e "  ${GREEN}✓${NC} $cmd: ${GREEN}Installed${NC}"
+        else
+            missing+=("$cmd")
+            echo -e "  ${RED}✗${NC} $cmd: ${RED}Missing${NC}"
         fi
     done
 
-    if [[ -n "$format" ]] && is_valid_output_format "$format"; then
-        echo "$format"
+    echo
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo -e "${GREEN}All dependencies are installed!${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}Missing dependencies: ${missing[*]}${NC}"
+        echo -e "${YELLOW}Run 'sudo $SCRIPT_NAME --install-deps' to install missing dependencies${NC}"
+        return 1
+    fi
+}
+
+detect_distribution() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        echo "$ID"
+    elif [[ -f /etc/debian_version ]]; then
+        echo "debian"
+    elif [[ -f /etc/fedora-release ]]; then
+        echo "fedora"
+    elif [[ -f /etc/arch-release ]]; then
+        echo "arch"
+    elif [[ -f /etc/SuSE-release ]]; then
+        echo "suse"
+    else
+        echo "unknown"
+    fi
+}
+
+get_package_manager() {
+    local distro="$1"
+    case "$distro" in
+        ubuntu|debian|linuxmint|popos)
+            echo "apt"
+            ;;
+        fedora|rhel|centos|almalinux|rocky)
+            echo "dnf"
+            ;;
+        arch|manjaro|endeavouros)
+            echo "pacman"
+            ;;
+        opensuse*|suse)
+            echo "zypper"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
+get_install_command() {
+    local distro="$1"
+    local pkg_manager="$2"
+    local package="$3"
+
+    case "$pkg_manager" in
+        apt)
+            echo "apt install -y $package"
+            ;;
+        dnf)
+            echo "dnf install -y $package"
+            ;;
+        pacman)
+            echo "pacman -S --noconfirm $package"
+            ;;
+        zypper)
+            echo "zypper install -y $package"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+install_dependencies() {
+    log "INFO" "Checking and installing dependencies..."
+
+    # Check for required commands
+    local missing_deps=()
+    local missing_packages=()
+
+    for i in "${!REQUIRED_COMMANDS[@]}"; do
+        local cmd="${REQUIRED_COMMANDS[$i]}"
+        local pkg="${REQUIRED_PACKAGES[$i]}"
+
+        if ! check_command "$cmd"; then
+            missing_deps+=("$cmd")
+            missing_packages+=("$pkg")
+        fi
+    done
+
+    if [[ ${#missing_deps[@]} -eq 0 ]]; then
+        log "INFO" "All dependencies are already installed."
         return 0
     fi
 
-    echo ""
-    return 1
-}
+    log "INFO" "Missing dependencies: ${missing_deps[*]}"
 
-remove_to_args() {
-    local args=("$@")
-    local result=()
-    local skip_next=false
+    # Detect distribution and install packages
+    local distro=$(detect_distribution)
+    local pkg_manager=$(get_package_manager "$distro")
 
-    for i in "${!args[@]}"; do
-        if [[ "$skip_next" == "true" ]]; then
-            skip_next=false
-            continue
+    log "INFO" "Detected distribution: $distro"
+    log "INFO" "Using package manager: $pkg_manager"
+
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        log "ERROR" "Dependencies need to be installed, but script is not running as root."
+        log "ERROR" "Please run: sudo $SCRIPT_NAME --install-deps"
+
+        # Show manual installation commands
+        echo -e "\n${YELLOW}Manual installation commands for your distribution:${NC}"
+        for pkg in "${missing_packages[@]}"; do
+            local install_cmd=$(get_install_command "$distro" "$pkg_manager" "$pkg")
+            if [[ -n "$install_cmd" ]]; then
+                echo -e "  sudo $install_cmd"
+            fi
+        done
+        return 1
+    fi
+
+    # Install packages based on distribution
+    case "$pkg_manager" in
+        apt)
+            log "INFO" "Updating package lists..."
+            apt update
+            log "INFO" "Installing packages: ${missing_packages[*]}"
+            apt install -y "${missing_packages[@]}" mesa-va-drivers \
+                libva-drm2 libva-x11-2 va-driver-all \
+                mesa-utils wget
+            ;;
+
+        dnf)
+            log "INFO" "Installing packages: ${missing_packages[*]}"
+            # Enable RPM Fusion if needed for ffmpeg
+            if ! rpm -q rpmfusion-free-release &>/dev/null; then
+                dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
+            fi
+            dnf install -y "${missing_packages[@]}" mesa-va-drivers \
+                libva-utils
+            ;;
+
+        pacman)
+            log "INFO" "Installing packages: ${missing_packages[*]}"
+            pacman -S --noconfirm "${missing_packages[@]}" libva-mesa-driver \
+                libva-utils
+            ;;
+
+        zypper)
+            log "INFO" "Installing packages: ${missing_packages[*]}"
+            zypper install -y "${missing_packages[@]}" Mesa-dri \
+                libva-utils
+            ;;
+
+        *)
+            log "ERROR" "Unsupported distribution for automatic installation"
+            echo -e "\n${YELLOW}Please install manually:${NC}"
+            echo "  ffmpeg, vainfo, pciutils, bc"
+            return 1
+            ;;
+    esac
+
+    # Verify installation
+    local still_missing=()
+    for cmd in "${missing_deps[@]}"; do
+        if ! check_command "$cmd"; then
+            still_missing+=("$cmd")
         fi
-
-        if [[ "${args[$i]}" == "to" ]] && [[ $i -lt $((${#args[@]} - 1)) ]]; then
-            skip_next=true
-            continue
-        fi
-
-        result+=("${args[$i]}")
     done
 
-    echo "${result[@]}"
+    if [[ ${#still_missing[@]} -eq 0 ]]; then
+        log "SUCCESS" "All dependencies installed successfully!"
+    else
+        log "ERROR" "Failed to install: ${still_missing[*]}"
+        return 1
+    fi
+
+    # Install gum separately if needed (optional)
+    if ! check_command "gum"; then
+        install_gum
+    fi
+
+    log "INFO" "Dependencies installation completed."
+}
+
+# ============================================
+# Gum Installation & Menu Functions
+# ============================================
+
+install_gum() {
+    log "INFO" "Installing gum for interactive menus..."
+
+    local distro=$(detect_distribution)
+    local pkg_manager=$(get_package_manager "$distro")
+
+    if [[ $EUID -ne 0 ]]; then
+        log "WARN" "Need root to install gum. Please run: sudo $0 --install-deps"
+        return 1
+    fi
+
+    case "$pkg_manager" in
+        apt)
+            # For Debian/Ubuntu, download the latest .deb
+            local temp_dir=$(mktemp -d)
+            cd "$temp_dir"
+            wget -q "https://github.com/charmbracelet/gum/releases/download/v0.14.0/gum_0.14.0_amd64.deb"
+            dpkg -i gum_0.14.0_amd64.deb
+            apt-get install -f -y
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+            ;;
+        dnf)
+            # For Fedora/RHEL
+            echo '[charm]
+name=Charm
+baseurl=https://repo.charm.sh/yum/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.charm.sh/yum/gpg.key' | tee /etc/yum.repos.d/charm.repo
+            dnf install -y gum
+            ;;
+        pacman)
+            # For Arch - non-interactive install
+            pacman -S --noconfirm gum
+            ;;
+        zypper)
+            # For openSUSE
+            zypper install -y gum
+            ;;
+        *)
+            # Fallback: download binary directly
+            log "INFO" "Downloading gum binary directly..."
+            local temp_dir=$(mktemp -d)
+            cd "$temp_dir"
+            wget -q "https://github.com/charmbracelet/gum/releases/download/v0.14.0/gum_0.14.0_Linux_x86_64.tar.gz"
+            tar -xzf gum_*.tar.gz
+            cp gum_*/gum /usr/local/bin/
+            chmod +x /usr/local/bin/gum
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+            ;;
+    esac
+
+    if check_command "gum"; then
+        log "SUCCESS" "gum installed successfully"
+        return 0
+    else
+        log "ERROR" "Failed to install gum"
+        return 1
+    fi
+}
+
+ensure_gum() {
+    if ! check_command "gum"; then
+        log "INFO" "gum not found. Installing for interactive menu..."
+        install_gum
+    fi
+}
+
+interactive_menu() {
+    ensure_gum
+
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║              Interactive Configuration Builder                     ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+
+    # Check dependencies first
+    if ! check_dependencies; then
+        if gum confirm "Missing dependencies. Install them now?"; then
+            install_dependencies
+        else
+            log "ERROR" "Cannot continue without dependencies"
+            exit 1
+        fi
+    fi
+
+    # Detect hardware first
+    detect_hardware_capabilities
+
+    # Format selection
+    local format_options=(${!OUTPUT_FORMATS[@]})
+    CONTAINER=$(gum choose --header "Select output format" "${format_options[@]}" --selected "mp4")
+
+    # Codec selection based on format
+    local compatible_codecs=(${FORMAT_COMPATIBILITY[$CONTAINER]})
+    CODEC=$(gum choose --header "Select video codec" "${compatible_codecs[@]}" --selected "${OUTPUT_FORMATS[$CONTAINER]}")
+
+    # Preset selection
+    PRESET=$(gum choose --header "Select quality preset" \
+        "maxquality" "balanced" "fast" "highcompression" "streaming" "dvd" --selected "balanced")
+
+    # Resolution preset
+    if gum confirm "Apply resolution preset?" --default=false; then
+        local res=$(gum choose --header "Select resolution" \
+            "480p" "720p" "1080p" "2K" "4K" "8K")
+        SCALE="${RESOLUTION_PRESETS[$res]}"
+    fi
+
+    # Quality value
+    if gum confirm "Custom quality value?" --default=false; then
+        QUALITY_VAL=$(gum input --placeholder "Enter quality value (16-32, lower=better)" --value "22")
+    fi
+
+    # Audio bitrate
+    AUDIO_BITRATE=$(gum input --placeholder "Audio bitrate (e.g., 128k)" --value "128k")
+
+    # Advanced options
+    if gum confirm "Configure advanced options?" --default=false; then
+        echo -e "${YELLOW}Advanced Options:${NC}"
+
+        if gum confirm "Enable VBAQ? (better texture detail)" --default=true; then
+            NO_VBAQ="false"
+        else
+            NO_VBAQ="true"
+        fi
+
+        if gum confirm "Enable pre-analysis? (better quality)" --default=true; then
+            NO_PREANALYSIS="false"
+        else
+            NO_PREANALYSIS="true"
+        fi
+
+        if gum confirm "Enable Open GOP? (better compression)" --default=true; then
+            NO_OPENGOP="false"
+        else
+            NO_OPENGOP="true"
+        fi
+
+        if gum confirm "Enable texture preservation? (better detail)" --default=false; then
+            TEXTURE_PRESERVE="true"
+        fi
+
+        if gum confirm "Force processing for malformed files?" --default=false; then
+            FORCE_PROCESS="true"
+        fi
+
+        if gum confirm "Target specific file size?" --default=false; then
+            TARGET_SIZE=$(gum input --placeholder "Target size (e.g., 100M, 1G)")
+        fi
+    fi
+
+    # Filter options
+    if gum confirm "Apply video filters?" --default=false; then
+        if gum confirm "Deinterlace?" --default=false; then
+            DEINTERLACE="true"
+        fi
+
+        if gum confirm "Apply denoising?" --default=false; then
+            DENOISE=$(gum choose --header "Denoise level" "low" "medium" "high")
+        fi
+
+        if gum confirm "Set framerate?" --default=false; then
+            FPS=$(gum input --placeholder "Framerate (e.g., 30, 60)")
+        fi
+
+        if gum confirm "Crop video?" --default=false; then
+            CROP=$(gum input --placeholder "Crop (width:height:x:y) e.g., 1920:1080:0:0")
+        fi
+    fi
+
+    # Output directory
+    OUTPUT_DIR=$(gum input --placeholder "Output directory" --value "output")
+
+    # Save configuration
+    if gum confirm "Save this configuration as a profile?" --default=false; then
+        local profile_name=$(gum input --placeholder "Profile name")
+        save_configuration "$profile_name"
+    fi
+
+    # Show summary
+    echo -e "\n${GREEN}Configuration Summary:${NC}"
+    echo -e "  Format: $CONTAINER"
+    echo -e "  Codec: $CODEC"
+    echo -e "  Preset: $PRESET"
+    [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE"
+    [[ -n "${QUALITY_VAL:-}" ]] && echo -e "  Quality: $QUALITY_VAL"
+    echo -e "  Audio: $AUDIO_BITRATE"
+    [[ "${NO_VBAQ:-false}" == "true" ]] && echo -e "  VBAQ: Disabled" || echo -e "  VBAQ: Enabled"
+    [[ "${NO_PREANALYSIS:-false}" == "true" ]] && echo -e "  Pre-analysis: Disabled" || echo -e "  Pre-analysis: Enabled"
+    [[ "${NO_OPENGOP:-false}" == "true" ]] && echo -e "  Open GOP: Disabled" || echo -e "  Open GOP: Enabled"
+    [[ "${TEXTURE_PRESERVE:-false}" == "true" ]] && echo -e "  Texture Preservation: Enabled"
+    [[ "${FORCE_PROCESS:-false}" == "true" ]] && echo -e "  Force Processing: Enabled"
+
+    if gum confirm "Start conversion with these settings?" --default=true; then
+        # Continue to file selection
+        local files=()
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(gum file --directory . --file --all)
+
+        if [[ ${#files[@]} -gt 0 ]]; then
+            process_files "${files[@]}"
+        else
+            log "ERROR" "No files selected"
+        fi
+    fi
+}
+
+# ============================================
+# Configuration File Management
+# ============================================
+
+save_configuration() {
+    local profile_name="${1:-default}"
+    local config_dir="${SCRIPT_DIR}/profiles"
+
+    mkdir -p "$config_dir"
+    local config_file="${config_dir}/${profile_name}.conf"
+
+    cat > "$config_file" << EOF
+# AMD GPU Batch Converter Profile
+# Generated: $(date)
+# Profile: $profile_name
+
+CODEC="$CODEC"
+PRESET="$PRESET"
+QUALITY_VAL="$QUALITY_VAL"
+AUDIO_BITRATE="$AUDIO_BITRATE"
+CONTAINER="$CONTAINER"
+SCALE="$SCALE"
+FPS="$FPS"
+DEINTERLACE="$DEINTERLACE"
+DENOISE="$DENOISE"
+CROP="$CROP"
+NO_VBAQ="$NO_VBAQ"
+NO_PREANALYSIS="$NO_PREANALYSIS"
+NO_OPENGOP="$NO_OPENGOP"
+TEXTURE_PRESERVE="$TEXTURE_PRESERVE"
+TARGET_SIZE="$TARGET_SIZE"
+OUTPUT_DIR="$OUTPUT_DIR"
+FORCE_PROCESS="$FORCE_PROCESS"
+EOF
+
+    log "SUCCESS" "Configuration saved to: $config_file"
+}
+
+load_configuration() {
+    local profile_name="$1"
+    local config_file="${PROFILES_DIR}/${profile_name}.conf"
+
+    if [[ ! -f "$config_file" ]]; then
+        # Try in script directory
+        config_file="${SCRIPT_DIR}/${profile_name}.conf"
+    fi
+
+    if [[ ! -f "$config_file" ]]; then
+        log "ERROR" "Configuration file not found: $profile_name"
+        return 1
+    fi
+
+    log "INFO" "Loading configuration: $config_file"
+    source "$config_file"
+    log "SUCCESS" "Configuration loaded"
+}
+
+list_configurations() {
+    echo -e "${BLUE}Available Profiles:${NC}"
+
+    # List profiles directory
+    if [[ -d "$PROFILES_DIR" ]]; then
+        for conf in "$PROFILES_DIR"/*.conf; do
+            if [[ -f "$conf" ]]; then
+                local name=$(basename "$conf" .conf)
+                local preset=$(grep "^PRESET=" "$conf" | cut -d'"' -f2)
+                local codec=$(grep "^CODEC=" "$conf" | cut -d'"' -f2)
+                local format=$(grep "^CONTAINER=" "$conf" | cut -d'"' -f2)
+                echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
+            fi
+        done
+    fi
+
+    # List in current directory
+    for conf in *.conf; do
+        if [[ -f "$conf" ]] && [[ "$conf" != "ffmpeg-Batch-convert.conf" ]]; then
+            local name=$(basename "$conf" .conf)
+            local preset=$(grep "^PRESET=" "$conf" 2>/dev/null | cut -d'"' -f2)
+            local codec=$(grep "^CODEC=" "$conf" 2>/dev/null | cut -d'"' -f2)
+            local format=$(grep "^CONTAINER=" "$conf" 2>/dev/null | cut -d'"' -f2)
+            echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
+        fi
+    done
 }
 
 # ============================================
@@ -763,432 +1204,91 @@ detect_hardware_capabilities() {
 }
 
 # ============================================
-# Gum Installation & Menu Functions
+# Format Detection and Validation
 # ============================================
 
-install_gum() {
-    log "INFO" "Installing gum for interactive menus..."
-
-    local distro=$(detect_distribution)
-    local pkg_manager=$(get_package_manager "$distro")
-
-    if [[ $EUID -ne 0 ]]; then
-        log "WARN" "Need root to install gum. Please run: sudo $0 --install-deps"
-        return 1
-    fi
-
-    case "$pkg_manager" in
-        apt)
-            # For Debian/Ubuntu, download the latest .deb
-            local temp_dir=$(mktemp -d)
-            cd "$temp_dir"
-            wget -q "https://github.com/charmbracelet/gum/releases/download/v0.14.0/gum_0.14.0_amd64.deb"
-            dpkg -i gum_0.14.0_amd64.deb
-            apt-get install -f -y
-            cd - > /dev/null
-            rm -rf "$temp_dir"
-            ;;
-        dnf)
-            # For Fedora/RHEL
-            echo '[charm]
-name=Charm
-baseurl=https://repo.charm.sh/yum/
-enabled=1
-gpgcheck=1
-gpgkey=https://repo.charm.sh/yum/gpg.key' | tee /etc/yum.repos.d/charm.repo
-            dnf install -y gum
-            ;;
-        pacman)
-            # For Arch - non-interactive install
-            pacman -S --noconfirm gum
-            ;;
-        zypper)
-            # For openSUSE
-            zypper install -y gum
-            ;;
-        *)
-            # Fallback: download binary directly
-            log "INFO" "Downloading gum binary directly..."
-            local temp_dir=$(mktemp -d)
-            cd "$temp_dir"
-            wget -q "https://github.com/charmbracelet/gum/releases/download/v0.14.0/gum_0.14.0_Linux_x86_64.tar.gz"
-            tar -xzf gum_*.tar.gz
-            cp gum_*/gum /usr/local/bin/
-            chmod +x /usr/local/bin/gum
-            cd - > /dev/null
-            rm -rf "$temp_dir"
-            ;;
-    esac
-
-    if check_command "gum"; then
-        log "SUCCESS" "gum installed successfully"
-        return 0
-    else
-        log "ERROR" "Failed to install gum"
-        return 1
-    fi
+is_valid_output_format() {
+    local format="$1"
+    [[ -n "${OUTPUT_FORMATS[$format]:-}" ]]
 }
 
-ensure_gum() {
-    if ! check_command "gum"; then
-        log "INFO" "gum not found. Installing for interactive menu..."
-        install_gum
-    fi
+get_default_codec_for_format() {
+    local format="$1"
+    echo "${OUTPUT_FORMATS[$format]:-h264}"
 }
 
-interactive_menu() {
-    ensure_gum
+validate_codec_for_format() {
+    local codec="$1"
+    local format="$2"
 
-    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║              Interactive Configuration Builder                     ║${NC}"
-    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
-
-    # Detect hardware first
-    detect_hardware_capabilities
-
-    # Format selection
-    local format_options=(${!OUTPUT_FORMATS[@]})
-    CONTAINER=$(gum choose --header "Select output format" "${format_options[@]}" --selected "mp4")
-
-    # Codec selection based on format
-    local compatible_codecs=(${FORMAT_COMPATIBILITY[$CONTAINER]})
-    CODEC=$(gum choose --header "Select video codec" "${compatible_codecs[@]}" --selected "${OUTPUT_FORMATS[$CONTAINER]}")
-
-    # Preset selection
-    PRESET=$(gum choose --header "Select quality preset" \
-        "maxquality" "balanced" "fast" "highcompression" "streaming" "dvd" --selected "balanced")
-
-    # Resolution preset
-    if gum confirm "Apply resolution preset?" --default=false; then
-        local res=$(gum choose --header "Select resolution" \
-            "480p" "720p" "1080p" "2K" "4K" "8K")
-        SCALE="${RESOLUTION_PRESETS[$res]}"
-    fi
-
-    # Quality value
-    if gum confirm "Custom quality value?" --default=false; then
-        QUALITY_VAL=$(gum input --placeholder "Enter quality value (16-32, lower=better)" --value "22")
-    fi
-
-    # Audio bitrate
-    AUDIO_BITRATE=$(gum input --placeholder "Audio bitrate (e.g., 128k)" --value "128k")
-
-    # Advanced options
-    if gum confirm "Configure advanced options?" --default=false; then
-        echo -e "${YELLOW}Advanced Options:${NC}"
-
-        if gum confirm "Enable VBAQ? (better texture detail)" --default=true; then
-            NO_VBAQ="false"
-        else
-            NO_VBAQ="true"
-        fi
-
-        if gum confirm "Enable pre-analysis? (better quality)" --default=true; then
-            NO_PREANALYSIS="false"
-        else
-            NO_PREANALYSIS="true"
-        fi
-
-        if gum confirm "Enable Open GOP? (better compression)" --default=true; then
-            NO_OPENGOP="false"
-        else
-            NO_OPENGOP="true"
-        fi
-
-        if gum confirm "Enable texture preservation? (better detail)" --default=false; then
-            TEXTURE_PRESERVE="true"
-        fi
-
-        if gum confirm "Force processing for malformed files?" --default=false; then
-            FORCE_PROCESS="true"
-        fi
-
-        if gum confirm "Target specific file size?" --default=false; then
-            TARGET_SIZE=$(gum input --placeholder "Target size (e.g., 100M, 1G)")
+    if [[ -n "${FORMAT_COMPATIBILITY[$format]:-}" ]]; then
+        if echo "${FORMAT_COMPATIBILITY[$format]}" | grep -qw "$codec"; then
+            return 0
         fi
     fi
-
-    # Filter options
-    if gum confirm "Apply video filters?" --default=false; then
-        if gum confirm "Deinterlace?" --default=false; then
-            DEINTERLACE="true"
-        fi
-
-        if gum confirm "Apply denoising?" --default=false; then
-            DENOISE=$(gum choose --header "Denoise level" "low" "medium" "high")
-        fi
-
-        if gum confirm "Set framerate?" --default=false; then
-            FPS=$(gum input --placeholder "Framerate (e.g., 30, 60)")
-        fi
-
-        if gum confirm "Crop video?" --default=false; then
-            CROP=$(gum input --placeholder "Crop (width:height:x:y) e.g., 1920:1080:0:0")
-        fi
-    fi
-
-    # Output directory
-    OUTPUT_DIR=$(gum input --placeholder "Output directory" --value "output")
-
-    # Save configuration
-    if gum confirm "Save this configuration as a profile?" --default=false; then
-        local profile_name=$(gum input --placeholder "Profile name")
-        save_configuration "$profile_name"
-    fi
-
-    # Show summary
-    echo -e "\n${GREEN}Configuration Summary:${NC}"
-    echo -e "  Format: $CONTAINER"
-    echo -e "  Codec: $CODEC"
-    echo -e "  Preset: $PRESET"
-    [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE"
-    [[ -n "${QUALITY_VAL:-}" ]] && echo -e "  Quality: $QUALITY_VAL"
-    echo -e "  Audio: $AUDIO_BITRATE"
-    [[ "${NO_VBAQ:-false}" == "true" ]] && echo -e "  VBAQ: Disabled" || echo -e "  VBAQ: Enabled"
-    [[ "${NO_PREANALYSIS:-false}" == "true" ]] && echo -e "  Pre-analysis: Disabled" || echo -e "  Pre-analysis: Enabled"
-    [[ "${NO_OPENGOP:-false}" == "true" ]] && echo -e "  Open GOP: Disabled" || echo -e "  Open GOP: Enabled"
-    [[ "${TEXTURE_PRESERVE:-false}" == "true" ]] && echo -e "  Texture Preservation: Enabled"
-    [[ "${FORCE_PROCESS:-false}" == "true" ]] && echo -e "  Force Processing: Enabled"
-
-    if gum confirm "Start conversion with these settings?" --default=true; then
-        # Continue to file selection
-        local files=()
-        while IFS= read -r file; do
-            files+=("$file")
-        done < <(gum file --directory . --file --all)
-
-        if [[ ${#files[@]} -gt 0 ]]; then
-            process_files "${files[@]}"
-        else
-            log "ERROR" "No files selected"
-        fi
-    fi
+    return 1
 }
 
-# ============================================
-# Configuration File Management
-# ============================================
+detect_output_format_from_args() {
+    local args=("$@")
+    local format=""
+    local to_index=-1
 
-save_configuration() {
-    local profile_name="${1:-default}"
-    local config_dir="${SCRIPT_DIR}/profiles"
-
-    mkdir -p "$config_dir"
-    local config_file="${config_dir}/${profile_name}.conf"
-
-    cat > "$config_file" << EOF
-# AMD GPU Batch Converter Profile
-# Generated: $(date)
-# Profile: $profile_name
-
-CODEC="$CODEC"
-PRESET="$PRESET"
-QUALITY_VAL="$QUALITY_VAL"
-AUDIO_BITRATE="$AUDIO_BITRATE"
-CONTAINER="$CONTAINER"
-SCALE="$SCALE"
-FPS="$FPS"
-DEINTERLACE="$DEINTERLACE"
-DENOISE="$DENOISE"
-CROP="$CROP"
-NO_VBAQ="$NO_VBAQ"
-NO_PREANALYSIS="$NO_PREANALYSIS"
-NO_OPENGOP="$NO_OPENGOP"
-TEXTURE_PRESERVE="$TEXTURE_PRESERVE"
-TARGET_SIZE="$TARGET_SIZE"
-OUTPUT_DIR="$OUTPUT_DIR"
-FORCE_PROCESS="$FORCE_PROCESS"
-EOF
-
-    log "SUCCESS" "Configuration saved to: $config_file"
-}
-
-load_configuration() {
-    local profile_name="$1"
-    local config_file="${PROFILES_DIR}/${profile_name}.conf"
-
-    if [[ ! -f "$config_file" ]]; then
-        # Try in script directory
-        config_file="${SCRIPT_DIR}/${profile_name}.conf"
-    fi
-
-    if [[ ! -f "$config_file" ]]; then
-        log "ERROR" "Configuration file not found: $profile_name"
-        return 1
-    fi
-
-    log "INFO" "Loading configuration: $config_file"
-    source "$config_file"
-    log "SUCCESS" "Configuration loaded"
-}
-
-list_configurations() {
-    echo -e "${BLUE}Available Profiles:${NC}"
-
-    # List profiles directory
-    if [[ -d "$PROFILES_DIR" ]]; then
-        for conf in "$PROFILES_DIR"/*.conf; do
-            if [[ -f "$conf" ]]; then
-                local name=$(basename "$conf" .conf)
-                local preset=$(grep "^PRESET=" "$conf" | cut -d'"' -f2)
-                local codec=$(grep "^CODEC=" "$conf" | cut -d'"' -f2)
-                local format=$(grep "^CONTAINER=" "$conf" | cut -d'"' -f2)
-                echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
-            fi
-        done
-    fi
-
-    # List in current directory
-    for conf in *.conf; do
-        if [[ -f "$conf" ]] && [[ "$conf" != "ffmpeg-Batch-convert.conf" ]]; then
-            local name=$(basename "$conf" .conf)
-            local preset=$(grep "^PRESET=" "$conf" 2>/dev/null | cut -d'"' -f2)
-            local codec=$(grep "^CODEC=" "$conf" 2>/dev/null | cut -d'"' -f2)
-            local format=$(grep "^CONTAINER=" "$conf" 2>/dev/null | cut -d'"' -f2)
-            echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
+    # Find "to" keyword
+    for i in "${!args[@]}"; do
+        if [[ "${args[$i]}" == "to" ]] && [[ $i -lt $((${#args[@]} - 1)) ]]; then
+            to_index=$i
+            format="${args[$((i+1))]}"
+            break
         fi
     done
+
+    if [[ -n "$format" ]] && is_valid_output_format "$format"; then
+        echo "$format"
+        return 0
+    fi
+
+    echo ""
+    return 1
 }
 
-# ============================================
-# Distribution Detection & Package Management
-# ============================================
+remove_to_args() {
+    local args=("$@")
+    local result=()
+    local skip_next=false
 
-detect_distribution() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        echo "$ID"
-    elif [[ -f /etc/debian_version ]]; then
-        echo "debian"
-    elif [[ -f /etc/fedora-release ]]; then
-        echo "fedora"
-    elif [[ -f /etc/arch-release ]]; then
-        echo "arch"
-    elif [[ -f /etc/SuSE-release ]]; then
-        echo "suse"
-    else
-        echo "unknown"
-    fi
-}
-
-get_package_manager() {
-    local distro="$1"
-    case "$distro" in
-        ubuntu|debian|linuxmint|popos)
-            echo "apt"
-            ;;
-        fedora|rhel|centos|almalinux|rocky)
-            echo "dnf"
-            ;;
-        arch|manjaro|endeavouros)
-            echo "pacman"
-            ;;
-        opensuse*|suse)
-            echo "zypper"
-            ;;
-        *)
-            echo "unknown"
-            ;;
-    esac
-}
-
-install_dependencies() {
-    log "INFO" "Checking and installing dependencies..."
-
-    # Check for required commands
-    local missing_deps=()
-
-    if ! check_command "ffmpeg"; then
-        missing_deps+=("ffmpeg")
-    fi
-
-    if ! check_command "vainfo"; then
-        missing_deps+=("vainfo")
-    fi
-
-    if ! check_command "lspci"; then
-        missing_deps+=("pciutils")
-    fi
-
-    if ! check_command "bc"; then
-        missing_deps+=("bc")
-    fi
-
-    if [[ ${#missing_deps[@]} -eq 0 ]]; then
-        log "INFO" "All dependencies are already installed."
-    else
-        log "INFO" "Missing dependencies: ${missing_deps[*]}"
-
-        # Detect distribution and install packages
-        local distro=$(detect_distribution)
-        local pkg_manager=$(get_package_manager "$distro")
-
-        log "INFO" "Detected distribution: $distro"
-        log "INFO" "Using package manager: $pkg_manager"
-
-        # Check if running as root
-        if [[ $EUID -ne 0 ]]; then
-            log "WARN" "Dependencies need to be installed, but script is not running as root."
-            log "WARN" "Please run: sudo $0 --install-deps"
-            return 1
+    for i in "${!args[@]}"; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next=false
+            continue
         fi
 
-        # Install packages based on distribution
-        case "$pkg_manager" in
-            apt)
-                log "INFO" "Updating package lists..."
-                apt update
-                log "INFO" "Installing FFmpeg and VA-API packages..."
-                apt install -y ffmpeg vainfo mesa-va-drivers \
-                    libva-drm2 libva-x11-2 va-driver-all \
-                    mesa-utils pciutils bc wget
-                ;;
+        if [[ "${args[$i]}" == "to" ]] && [[ $i -lt $((${#args[@]} - 1)) ]]; then
+            skip_next=true
+            continue
+        fi
 
-            dnf)
-                log "INFO" "Installing FFmpeg and VA-API packages..."
-                # Enable RPM Fusion if needed
-                if ! rpm -q rpmfusion-free-release &>/dev/null; then
-                    dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
-                fi
-                dnf install -y ffmpeg ffmpeg-libs vainfo \
-                    mesa-va-drivers libva-utils pciutils bc wget
-                ;;
+        result+=("${args[$i]}")
+    done
 
-            pacman)
-                log "INFO" "Installing FFmpeg and VA-API packages..."
-                pacman -S --noconfirm ffmpeg libva-utils \
-                    mesa-utils libva-mesa-driver pciutils bc wget
-                ;;
-
-            zypper)
-                log "INFO" "Installing FFmpeg and VA-API packages..."
-                zypper install -y ffmpeg vainfo \
-                    libva-utils Mesa-dri pciutils bc wget
-                ;;
-
-            *)
-                log "ERROR" "Unsupported distribution for automatic installation"
-                return 1
-                ;;
-        esac
-    fi
-
-    # Install gum separately if needed
-    if ! check_command "gum"; then
-        install_gum
-    fi
-
-    log "INFO" "Dependencies installation completed."
+    echo "${result[@]}"
 }
 
 # ============================================
-# FFmpeg Command Generation with Universal AMD Support
+# FFmpeg Command Generation with Fixed VA-API
 # ============================================
 
 calculate_bitrate_for_target_size() {
     local input_file="$1"
     local target_size="$2"
     local duration
+
+    # Check if bc is available
+    if ! check_command "bc"; then
+        log "ERROR" "bc calculator not found. Please install bc first."
+        log "INFO" "Run: sudo $SCRIPT_NAME --install-deps"
+        return 1
+    fi
 
     # Get duration in seconds
     duration=$(ffprobe -v error -show_entries format=duration \
@@ -1267,7 +1367,7 @@ build_ffmpeg_command() {
         fi
     fi
 
-    # Hardware acceleration setup with zero-copy pipeline
+    # Hardware acceleration setup with fixed VA-API command construction
     if [[ "${NO_HWACCEL:-false}" != "true" ]] && [[ "${HAS_VAAPI:-false}" == "true" ]]; then
         local driver_info=$(get_amd_driver_info)
         log "DEBUG" "Using AMD driver: $driver_info"
@@ -1329,14 +1429,15 @@ build_ffmpeg_command() {
                 cmd=${cmd/"-open_gop 1"/"-open_gop 0"}
             fi
 
-        # Fallback to VA-API if AMF not available or fails
+        # Fallback to VA-API if AMF not available or fails - FIXED VERSION
         elif check_vaapi_encoding_support "$CODEC"; then
-            # VA-API encoding path with zero-copy
+            # VA-API encoding path with fixed command construction
             log "AMD" "Using VA-API hardware encoding pipeline (zero-copy)"
-            cmd+=" -hwaccel vaapi -hwaccel_device $RENDER_DEVICE -hwaccel_output_format vaapi"
-            cmd+=" -i \"$input_file\""
 
-            # Build video filter chain with zero-copy
+            # Add input file ONCE with hardware acceleration
+            cmd+=" -vaapi_device $RENDER_DEVICE -i \"$input_file\""
+
+            # Build video filter chain with proper hardware upload
             local filters="format=nv12,hwupload"
 
             # Add deinterlacing if requested OR for VOB files (DVD is always interlaced)
@@ -1464,7 +1565,7 @@ build_ffmpeg_command() {
 }
 
 # ============================================
-# File Processing with VOB fixes
+# File Processing
 # ============================================
 
 get_file_info() {
@@ -1516,9 +1617,9 @@ get_file_info() {
         local bitrate_formatted="$bitrate"
         if [[ "$bitrate" =~ ^[0-9]+$ ]]; then
             if [[ $bitrate -gt 1000000 ]]; then
-                bitrate_formatted="$(echo "scale=1; $bitrate/1000000" | bc) Mbps"
+                bitrate_formatted="$(echo "scale=1; $bitrate/1000000" | bc 2>/dev/null || echo "$bitrate") Mbps"
             elif [[ $bitrate -gt 1000 ]]; then
-                bitrate_formatted="$(echo "scale=1; $bitrate/1000" | bc) Kbps"
+                bitrate_formatted="$(echo "scale=1; $bitrate/1000" | bc 2>/dev/null || echo "$bitrate") Kbps"
             fi
         else
             bitrate_formatted="N/A"
@@ -1586,7 +1687,7 @@ process_file() {
             local input_size=$(du -b "$input_file" | cut -f1)
             local output_size=$(du -b "$output_file" | cut -f1)
             if [[ -n "$input_size" ]] && [[ -n "$output_size" ]] && [[ $input_size -gt 0 ]]; then
-                local ratio=$(echo "scale=2; $output_size * 100 / $input_size" | bc)
+                local ratio=$(echo "scale=2; $output_size * 100 / $input_size" | bc 2>/dev/null || echo "0")
                 log "INFO" "  Compression: ${ratio}% of original"
             fi
         fi
@@ -1685,6 +1786,14 @@ main() {
             --dry-run)
                 DRY_RUN=true
                 shift
+                ;;
+            --check-deps)
+                check_dependencies
+                exit $?
+                ;;
+            --install-deps)
+                install_dependencies
+                exit $?
                 ;;
             -o|--output)
                 OUTPUT_DIR="$2"
@@ -1798,10 +1907,6 @@ main() {
                 display_gpu_info
                 exit 0
                 ;;
-            --install-deps)
-                install_dependencies
-                exit $?
-                ;;
             -*)
                 log "ERROR" "Unknown option: $1"
                 print_usage
@@ -1816,6 +1921,15 @@ main() {
 
     # Print banner
     print_banner
+
+    # Quick dependency check
+    if ! check_command "bc"; then
+        log "ERROR" "bc calculator not found. This is required for bitrate calculation."
+        log "INFO" "Please install bc first:"
+        log "INFO" "  sudo $SCRIPT_NAME --install-deps"
+        log "INFO" "Or run: sudo ./$SCRIPT_NAME --install-deps"
+        exit 1
+    fi
 
     # Set defaults
     CODEC="${CODEC:-$DEFAULT_CODEC}"
@@ -1834,10 +1948,14 @@ main() {
     if ! validate_codec_for_format "$CODEC" "$CONTAINER"; then
         log "WARN" "Codec $CODEC may not be compatible with $CONTAINER format"
         log "WARN" "Compatible codecs for $CONTAINER: ${FORMAT_COMPATIBILITY[$CONTAINER]}"
-        if gum confirm "Continue anyway?" --default=false; then
-            log "INFO" "Continuing with $CODEC/$CONTAINER combination"
+        if command -v gum &>/dev/null; then
+            if gum confirm "Continue anyway?" --default=false; then
+                log "INFO" "Continuing with $CODEC/$CONTAINER combination"
+            else
+                exit 1
+            fi
         else
-            exit 1
+            log "WARN" "Continuing anyway (use --conf for interactive mode)"
         fi
     fi
 
