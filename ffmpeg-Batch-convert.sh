@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.4
+# Version: 1.1.5
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -19,16 +19,17 @@
 #   - Zero-copy hardware pipeline
 #   - HQVBR for consistent quality
 #   - Advanced VOB/DVD format support with forced processing
-#   - Automatic deinterlacing for DVD content
-#   - Better error recovery for malformed files
+#   - Flexible output format specification (to mkv, to mp4, to avi)
+#   - Format auto-detection from output extension
+#   - Smart container validation
 #
 # Changelog:
-#   v1.1.4 - Fixed VOB file duration issues with forced processing
-#          - Added automatic deinterlacing for DVD/VOB files
-#          - Better handling of malformed headers
-#          - Added force flag for problematic files
-#          - Improved error recovery with alternative codecs
-#          - Added DVD chapter support
+#   v1.1.5 - Added support for "to [format]" syntax
+#          - Auto-detection of output format from arguments
+#          - Smart container validation
+#          - Better format compatibility checking
+#          - Multiple output format presets
+#   v1.1.4 - Fixed VOB file duration issues, added DVD preset
 #   v1.1.3 - Fixed VOB file duration parsing
 #   v1.1.2 - Fixed unbound variable errors
 #   v1.1.1 - Added universal AMD GPU support, AV1 encoding
@@ -42,7 +43,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.4"
+VERSION="1.1.5"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -64,7 +65,31 @@ DEFAULT_CODEC="h264"
 DEFAULT_QUALITY="balanced"
 DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
-INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob" "VOB" "vob" "VOB")
+INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob" "VOB")
+
+# Supported output formats and their default codecs
+declare -A OUTPUT_FORMATS=(
+    ["mp4"]="h264"
+    ["mkv"]="h264"
+    ["avi"]="h264"
+    ["mov"]="h264"
+    ["webm"]="vp9"
+    ["m4v"]="h264"
+    ["3gp"]="h264"
+    ["ogv"]="theora"
+)
+
+# Format compatibility with codecs
+declare -A FORMAT_COMPATIBILITY=(
+    ["mp4"]="h264 hevc av1"
+    ["mkv"]="h264 hevc av1 vp9 theora"
+    ["avi"]="h264"
+    ["mov"]="h264 hevc"
+    ["webm"]="vp9 av1"
+    ["m4v"]="h264 hevc"
+    ["3gp"]="h264"
+    ["ogv"]="theora"
+)
 
 # Initialize variables with defaults
 DEBUG="${DEBUG:-false}"
@@ -84,7 +109,7 @@ HAS_AV1_HW="${HAS_AV1_HW:-false}"
 HAS_OPEN_GOP="${HAS_OPEN_GOP:-false}"
 GPU_ARCHITECTURE="${GPU_ARCHITECTURE:-UNKNOWN}"
 RENDER_DEVICE="${RENDER_DEVICE:-}"
-FORCE_PROCESS="${FORCE_PROCESS:-false}"  # New flag for forced processing
+FORCE_PROCESS="${FORCE_PROCESS:-false}"
 
 # Resolution presets
 declare -A RESOLUTION_PRESETS=(
@@ -165,6 +190,8 @@ declare -A BFRAME_SETTINGS=(
     ["h264"]="-bf 3 -refs 6 -b_strategy 2 -weightb 1 -directpred 3 -b_pyramid normal"
     ["hevc"]="-bf 5 -refs 5 -b_strategy 2 -weightb 1 -b_pyramid 1"
     ["av1"]="-bf 3 -refs 4"  # AV1 handles B-frames differently
+    ["vp9"]=""  # VP9 handles B-frames internally
+    ["theora"]=""  # Theora has its own settings
 )
 
 # Motion estimation settings per quality preset
@@ -201,15 +228,15 @@ print_banner() {
     echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}"
     echo -e "${CYAN}║   • Zero-copy hardware pipeline                                    ║${NC}"
     echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}"
-    echo -e "${CYAN}║   • Advanced VOB/DVD support with forced processing                ║${NC}"
-    echo -e "${CYAN}║   • Automatic deinterlacing for DVD content                        ║${NC}"
+    echo -e "${CYAN}║   • Flexible output formats: to mp4, to mkv, to avi                ║${NC}"
+    echo -e "${CYAN}║   • Auto-detection from command line                               ║${NC}"
     echo -e "${CYAN}║                                                                   ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 }
 
 print_usage() {
     echo -e "${GREEN}USAGE:${NC}"
-    echo -e "    $SCRIPT_NAME [OPTIONS] [FILES...]"
+    echo -e "    $SCRIPT_NAME [OPTIONS] [FILES...] [to FORMAT]"
     echo
     echo -e "${GREEN}OPTIONS:${NC}"
     echo -e "    -h, --help              Show this help message"
@@ -226,7 +253,8 @@ print_usage() {
     echo
     echo -e "${YELLOW}Output Options:${NC}"
     echo -e "    -o, --output DIR        Output directory (default: ./output)"
-    echo -e "    -c, --codec CODEC       Video codec: h264, hevc, av1 (default: h264)"
+    echo -e "    -c, --codec CODEC       Video codec: h264, hevc, av1, vp9, theora"
+    echo -e "                            (default: auto-detected from format)"
     echo -e "    -p, --preset PRESET     Quality preset: "
     echo -e "                            • maxquality - Maximum quality (largest files)"
     echo -e "                            • balanced  - Good quality/size balance"
@@ -239,6 +267,16 @@ print_usage() {
     echo -e "    -a, --audio-bitrate R   Audio bitrate (default: 128k)"
     echo -e "    -f, --format EXT        Output container (default: mp4)"
     echo -e "    -r, --resolution PRESET Resolution preset: 480p, 720p, 1080p, 2K, 4K, 8K"
+    echo
+    echo -e "${YELLOW}Output Format Shortcuts:${NC}"
+    echo -e "    to mp4                  Convert to MP4 format"
+    echo -e "    to mkv                  Convert to MKV format"
+    echo -e "    to avi                  Convert to AVI format"
+    echo -e "    to webm                 Convert to WebM format"
+    echo -e "    to mov                  Convert to MOV format"
+    echo -e "    to m4v                  Convert to M4V format"
+    echo -e "    to 3gp                  Convert to 3GP format"
+    echo -e "    to ogv                  Convert to OGV format"
     echo
     echo -e "${YELLOW}Processing Options:${NC}"
     echo -e "    --keep-tree             Preserve directory structure"
@@ -259,14 +297,23 @@ print_usage() {
     echo -e "    --crop W:H:X:Y          Crop video (width:height:x:y)"
     echo
     echo -e "${GREEN}EXAMPLES:${NC}"
-    echo -e "    # Convert DVD VOB files with forced processing"
-    echo -e "    $SCRIPT_NAME --force-process -p dvd *.VOB"
+    echo -e "    # Basic conversion with default MP4 output"
+    echo -e "    $SCRIPT_NAME *.mkv"
     echo
-    echo -e "    # AV1 encoding on RDNA 3 GPU"
-    echo -e "    $SCRIPT_NAME -c av1 -p maxquality --gpu-info *.mp4"
+    echo -e "    # Convert to MKV format using to syntax"
+    echo -e "    $SCRIPT_NAME *.mp4 to mkv"
+    echo
+    echo -e "    # Convert VOB files to AVI with quality preset"
+    echo -e "    $SCRIPT_NAME --force-process -p dvd *.VOB to avi"
+    echo
+    echo -e "    # Convert to WebM with VP9 codec"
+    echo -e "    $SCRIPT_NAME *.mp4 to webm"
     echo
     echo -e "    # Interactive configuration menu"
     echo -e "    $SCRIPT_NAME --conf"
+    echo
+    echo -e "    # AV1 encoding to MKV on RDNA 3 GPU"
+    echo -e "    $SCRIPT_NAME -c av1 -p maxquality video.mp4 to mkv"
     echo
     echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}"
     echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability"
@@ -276,6 +323,7 @@ print_usage() {
     echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 5"
     echo
     echo -e "${BLUE}Supported input formats:${NC} ${INPUT_EXTENSIONS[*]}"
+    echo -e "${BLUE}Supported output formats:${NC} ${!OUTPUT_FORMATS[*]}"
 }
 
 print_version() {
@@ -308,6 +356,77 @@ check_command() {
         return 1
     fi
     return 0
+}
+
+# ============================================
+# Format Detection and Validation
+# ============================================
+
+is_valid_output_format() {
+    local format="$1"
+    [[ -n "${OUTPUT_FORMATS[$format]:-}" ]]
+}
+
+get_default_codec_for_format() {
+    local format="$1"
+    echo "${OUTPUT_FORMATS[$format]:-h264}"
+}
+
+validate_codec_for_format() {
+    local codec="$1"
+    local format="$2"
+
+    if [[ -n "${FORMAT_COMPATIBILITY[$format]:-}" ]]; then
+        if echo "${FORMAT_COMPATIBILITY[$format]}" | grep -qw "$codec"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+detect_output_format_from_args() {
+    local args=("$@")
+    local format=""
+    local to_index=-1
+
+    # Find "to" keyword
+    for i in "${!args[@]}"; do
+        if [[ "${args[$i]}" == "to" ]] && [[ $i -lt $((${#args[@]} - 1)) ]]; then
+            to_index=$i
+            format="${args[$((i+1))]}"
+            break
+        fi
+    done
+
+    if [[ -n "$format" ]] && is_valid_output_format "$format"; then
+        echo "$format"
+        return 0
+    fi
+
+    echo ""
+    return 1
+}
+
+remove_to_args() {
+    local args=("$@")
+    local result=()
+    local skip_next=false
+
+    for i in "${!args[@]}"; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next=false
+            continue
+        fi
+
+        if [[ "${args[$i]}" == "to" ]] && [[ $i -lt $((${#args[@]} - 1)) ]]; then
+            skip_next=true
+            continue
+        fi
+
+        result+=("${args[$i]}")
+    done
+
+    echo "${result[@]}"
 }
 
 # ============================================
@@ -727,13 +846,13 @@ interactive_menu() {
     # Detect hardware first
     detect_hardware_capabilities
 
-    # Codec selection (show AV1 only if supported)
-    local codec_options=("h264" "hevc")
-    if [[ "${HAS_AV1_HW:-false}" == "true" ]]; then
-        codec_options+=("av1")
-    fi
+    # Format selection
+    local format_options=(${!OUTPUT_FORMATS[@]})
+    CONTAINER=$(gum choose --header "Select output format" "${format_options[@]}" --selected "mp4")
 
-    CODEC=$(gum choose --header "Select video codec" "${codec_options[@]}" --selected "h264")
+    # Codec selection based on format
+    local compatible_codecs=(${FORMAT_COMPATIBILITY[$CONTAINER]})
+    CODEC=$(gum choose --header "Select video codec" "${compatible_codecs[@]}" --selected "${OUTPUT_FORMATS[$CONTAINER]}")
 
     # Preset selection
     PRESET=$(gum choose --header "Select quality preset" \
@@ -819,6 +938,7 @@ interactive_menu() {
 
     # Show summary
     echo -e "\n${GREEN}Configuration Summary:${NC}"
+    echo -e "  Format: $CONTAINER"
     echo -e "  Codec: $CODEC"
     echo -e "  Preset: $PRESET"
     [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE"
@@ -912,7 +1032,8 @@ list_configurations() {
                 local name=$(basename "$conf" .conf)
                 local preset=$(grep "^PRESET=" "$conf" | cut -d'"' -f2)
                 local codec=$(grep "^CODEC=" "$conf" | cut -d'"' -f2)
-                echo -e "  ${GREEN}•${NC} $name (${codec}/${preset})"
+                local format=$(grep "^CONTAINER=" "$conf" | cut -d'"' -f2)
+                echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
             fi
         done
     fi
@@ -923,7 +1044,8 @@ list_configurations() {
             local name=$(basename "$conf" .conf)
             local preset=$(grep "^PRESET=" "$conf" 2>/dev/null | cut -d'"' -f2)
             local codec=$(grep "^CODEC=" "$conf" 2>/dev/null | cut -d'"' -f2)
-            echo -e "  ${GREEN}•${NC} $name (${codec}/${preset})"
+            local format=$(grep "^CONTAINER=" "$conf" 2>/dev/null | cut -d'"' -f2)
+            echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
         fi
     done
 }
@@ -1281,6 +1403,12 @@ build_ffmpeg_command() {
         if [[ "$CODEC" == "av1" ]]; then
             # AV1 software encoding (very slow but available)
             cmd+=" -c:v libaom-av1 -crf 30 -cpu-used 4"
+        elif [[ "$CODEC" == "vp9" ]]; then
+            # VP9 software encoding
+            cmd+=" -c:v libvpx-vp9 -crf 30 -b:v 0 -cpu-used 4"
+        elif [[ "$CODEC" == "theora" ]]; then
+            # Theora software encoding
+            cmd+=" -c:v libtheora -q:v 7"
         else
             cmd+=" -c:v libx${CODEC}"
 
@@ -1321,8 +1449,10 @@ build_ffmpeg_command() {
         cmd+=" -ss ${TRIM%:*} -t ${TRIM#*:}"
     fi
 
-    # Add faststart for web optimization
-    cmd+=" -movflags +faststart"
+    # Add faststart for web optimization (only for MP4/M4V)
+    if [[ "$CONTAINER" == "mp4" || "$CONTAINER" == "m4v" ]]; then
+        cmd+=" -movflags +faststart"
+    fi
 
     # Add metadata preservation
     cmd+=" -map_metadata 0"
@@ -1473,7 +1603,7 @@ process_file() {
         # If it's a VOB file and we didn't use force, suggest it
         if is_vob_file "$input_file" && [[ "${FORCE_PROCESS:-false}" != "true" ]]; then
             log "INFO" "Tip: VOB files often need forced processing. Try:"
-            log "INFO" "  $SCRIPT_NAME --force-process -p dvd $input_file"
+            log "INFO" "  $SCRIPT_NAME --force-process -p dvd $input_file to $CONTAINER"
         fi
 
         return 1
@@ -1518,10 +1648,22 @@ process_files() {
 }
 
 # ============================================
-# Main Script
+# Main Script with Format Detection
 # ============================================
 
 main() {
+    # Check for "to FORMAT" syntax and extract format
+    local detected_format=$(detect_output_format_from_args "$@")
+    if [[ -n "$detected_format" ]]; then
+        CONTAINER="$detected_format"
+        # Set default codec based on format
+        CODEC="${CODEC:-$(get_default_codec_for_format "$CONTAINER")}"
+        log "INFO" "Detected output format: $CONTAINER (using $CODEC codec)"
+
+        # Remove "to FORMAT" from arguments
+        eval set -- $(remove_to_args "$@")
+    fi
+
     # Parse command line arguments
     local files=()
 
@@ -1681,9 +1823,27 @@ main() {
     AUDIO_BITRATE="${AUDIO_BITRATE:-$DEFAULT_AUDIO_BITRATE}"
     CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
 
+    # Validate output format
+    if ! is_valid_output_format "$CONTAINER"; then
+        log "ERROR" "Invalid output format: $CONTAINER"
+        echo "Supported formats: ${!OUTPUT_FORMATS[*]}"
+        exit 1
+    fi
+
+    # Validate codec for selected format
+    if ! validate_codec_for_format "$CODEC" "$CONTAINER"; then
+        log "WARN" "Codec $CODEC may not be compatible with $CONTAINER format"
+        log "WARN" "Compatible codecs for $CONTAINER: ${FORMAT_COMPATIBILITY[$CONTAINER]}"
+        if gum confirm "Continue anyway?" --default=false; then
+            log "INFO" "Continuing with $CODEC/$CONTAINER combination"
+        else
+            exit 1
+        fi
+    fi
+
     # Validate codec
-    if [[ "$CODEC" != "h264" ]] && [[ "$CODEC" != "hevc" ]] && [[ "$CODEC" != "av1" ]]; then
-        log "ERROR" "Invalid codec: $CODEC (must be h264, hevc, or av1)"
+    if [[ "$CODEC" != "h264" ]] && [[ "$CODEC" != "hevc" ]] && [[ "$CODEC" != "av1" ]] && [[ "$CODEC" != "vp9" ]] && [[ "$CODEC" != "theora" ]]; then
+        log "ERROR" "Invalid codec: $CODEC (must be h264, hevc, av1, vp9, or theora)"
         exit 1
     fi
 
@@ -1753,6 +1913,12 @@ main() {
         CODEC="hevc"
     fi
 
+    # Check VP9/Theora hardware support (usually CPU only)
+    if [[ "$CODEC" == "vp9" || "$CODEC" == "theora" ]]; then
+        log "INFO" "$CODEC encoding is CPU-based (no hardware acceleration)"
+        NO_HWACCEL=true
+    fi
+
     # Determine encoding method with fallback
     if [[ "$NO_HWACCEL" == "true" ]]; then
         USE_AMF=false
@@ -1782,6 +1948,7 @@ main() {
 
     # Show encoding settings
     log "INFO" "Encoding settings:"
+    log "INFO" "  • Format: $CONTAINER"
     log "INFO" "  • Codec: $CODEC"
     log "INFO" "  • Preset: $PRESET"
     [[ -n "${QUALITY_VAL:-}" ]] && log "INFO" "  • Quality: $QUALITY_VAL"
