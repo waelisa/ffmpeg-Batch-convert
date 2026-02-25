@@ -1,7 +1,7 @@
 # Advanced AMD GPU Batch Video Converter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-1.1.7-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.1.8-blue.svg)](#)
 [![Bash](https://img.shields.io/badge/Shell-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 
 An advanced Bash script for high-performance batch video conversion leveraging AMD Advanced Media Framework (AMF) and VA-API. Designed specifically for AMD VGA owners to achieve professional-grade encoding with minimal CPU usage.
