@@ -1,0 +1,119 @@
+1. Getting Started
+
+A. Prerequisites
+Before running the script, ensure you have an AMD GPU and a Linux-based operating system. The script requires the following tools:
+
+    ffmpeg
+
+    vainfo
+
+    lspci (from pciutils)
+
+    bc
+
+    ffprobe
+
+B. Initial Setup
+
+    Make the script executable:
+    Bash
+
+    chmod +x ffmpeg-Batch-convert.sh
+
+    Check for dependencies:
+    Bash
+
+    ./ffmpeg-Batch-convert.sh --check-deps
+
+    Install missing dependencies (if needed):
+    Bash
+
+    sudo ./ffmpeg-Batch-convert.sh --install-deps
+
+    Note: The script supports automatic installation for Ubuntu, Debian, Fedora, Arch, and openSUSE.
+
+2. Usage Syntax
+
+Basic Syntax:
+Bash
+
+./ffmpeg-Batch-convert.sh [OPTIONS] [FILES...] [to FORMAT]
+
+Common Examples:
+
+    Simple Conversion: Convert all files to MP4.
+    Bash
+
+    ./ffmpeg-Batch-convert.sh *.mkv to mp4
+
+    Specific Codec & Preset: Convert to MKV using HEVC with maximum quality.
+    Bash
+
+    ./ffmpeg-Batch-convert.sh -c hevc -p maxquality video.mp4 to mkv
+
+    Dry Run: See what commands will be executed without actually converting.
+    Bash
+
+    ./ffmpeg-Batch-convert.sh --dry-run video.mp4 to mkv
+
+    Interactive Menu: Run the script without arguments to use the graphical builder.
+    Bash
+
+    ./ffmpeg-Batch-convert.sh --conf
+
+3. Key Options
+
+Output Options:
+
+    -o, --output DIR: Set the output directory (default: ./output).
+
+    -c, --codec CODEC: Choose a codec: h264, hevc, av1, vp9, theora.
+
+    -p, --preset PRESET: Choose a quality preset:
+
+        maxquality: Highest quality, largest files.
+
+        balanced: Best balance of size and quality (default).
+
+        fast: Quickest encoding time.
+
+        highcompression: Smallest file sizes.
+
+        dvd: Optimized for VOB/DVD files.
+
+    -r, --resolution PRESET: Set resolution (e.g., 720p, 1080p, 4K).
+
+Filter & Processing Options:
+
+    --scale WxH: Resize video (e.g., 1280x720).
+
+    --deinterlace: Force deinterlacing for older video formats.
+
+    --target-size SIZE: Attempt to hit a specific file size (e.g., 500M).
+
+    --keep-tree: Maintain the original folder structure in the output directory.
+
+    --force: Overwrite existing files without asking.
+
+4. Advanced Features
+
+    GPU Detection: The script automatically detects your AMD architecture (e.g., RDNA 3) and adjusts B-frame settings for optimal stability and quality.
+
+    AV1 Encoding: Supported for users with RDNA 3 (RX 7000 series) GPUs.
+
+    Profile Management: You can save and load custom encoding settings:
+
+        --save-conf NAME: Save current settings as a profile.
+
+        --load-conf NAME: Load a previously saved profile.
+
+        --list-conf: List all available profiles.
+
+5. Troubleshooting
+
+    GPU Info: If you are unsure about your hardware capabilities, run:
+    Bash
+
+    ./ffmpeg-Batch-convert.sh --gpu-info
+
+    Malformed Files: Use --force-process if the script refuses to touch certain files it deems corrupt.

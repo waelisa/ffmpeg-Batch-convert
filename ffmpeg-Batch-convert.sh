@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.7
+# Version: 1.1.8
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -20,14 +20,17 @@
 #   - HQVBR for consistent quality
 #   - Flexible output formats: to mp4, to mkv, to avi
 #   - Auto-detection from command line
-#   - Fixed log output redirection (all logs to stderr)
-#   - Clean command capture without debug messages
+#   - Fixed dry run output (no duplicate commands)
+#   - Enhanced HEVC/VA-API compatibility
+#   - Improved B-frame settings for RDNA 3
 #
 # Changelog:
+#   v1.1.8 - Fixed dry run output duplication
+#          - Enhanced HEVC VA-API compatibility
+#          - Improved B-frame settings for RDNA 3
+#          - Added codec override when format changes
+#          - Better handling of -c flag with to syntax
 #   v1.1.7 - Fixed log output redirection to stderr
-#          - Ensures clean command capture without debug text
-#          - All log messages now go to stderr, not stdout
-#          - Prevents log messages from being captured in command string
 #   v1.1.6 - Fixed VA-API command construction, added bc dependency
 #   v1.1.5 - Added "to [format]" syntax support
 #   v1.1.4 - Fixed VOB file duration issues, added DVD preset
@@ -44,7 +47,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.7"
+VERSION="1.1.8"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -136,7 +139,7 @@ declare -A AMD_ARCHITECTURES=(
 )
 
 # ============================================
-# Enhanced AMD-Specific Encoding Presets v4
+# Enhanced AMD-Specific Encoding Presets v5
 # ============================================
 
 # AMF encoder presets with HQVBR for all AMD GPUs
@@ -160,7 +163,7 @@ declare -A QUALITY_PRESETS=(
     ["dvd"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 8M -bufsize 16M -vbaq 1 -preanalysis 1 -me quarter -maxaufsize 3 -gops_per_idr 30 -open_gop 1"
 )
 
-# VA-API presets for open-source driver path
+# VA-API presets for open-source driver path (optimized for RDNA 3)
 declare -A VAAPI_QUALITY_PRESETS=(
     ["maxquality"]="-rc CQP -qp 18 -maxrate 50M -compression_level 7 -quality 7"
     ["balanced"]="-rc VBR -b:v 8M -maxrate 15M -compression_level 5 -qp 22 -quality 5"
@@ -180,20 +183,20 @@ declare -A AV1_QUALITY_PRESETS=(
     ["dvd"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 6M"
 )
 
-# GPU architecture specific B-frame settings
+# GPU architecture specific B-frame settings (enhanced for RDNA 3)
 declare -A BFRAME_SAFETY=(
     ["POLARIS"]="-bf 0"  # B-frames can cause issues on Polaris
     ["VEGA"]="-bf 2 -refs 3"  # Limited B-frame support on Vega
     ["RDNA1"]="-bf 3 -refs 4"  # Full B-frame support on RDNA 1
     ["RDNA2"]="-bf 4 -refs 5"  # Enhanced on RDNA 2
-    ["RDNA3"]="-bf 5 -refs 6"  # Maximum on RDNA 3
+    ["RDNA3"]="-bf 4 -refs 5"  # RDNA 3 works best with 4 B-frames for HEVC
     ["UNKNOWN"]="-bf 2 -refs 3"  # Conservative default
 )
 
 # Codec-specific B-frame settings
 declare -A BFRAME_SETTINGS=(
     ["h264"]="-bf 3 -refs 6 -b_strategy 2 -weightb 1 -directpred 3 -b_pyramid normal"
-    ["hevc"]="-bf 5 -refs 5 -b_strategy 2 -weightb 1 -b_pyramid 1"
+    ["hevc"]="-bf 4 -refs 5 -b_strategy 2 -weightb 1 -b_pyramid 1"
     ["av1"]="-bf 3 -refs 4"  # AV1 handles B-frames differently
     ["vp9"]=""  # VP9 handles B-frames internally
     ["theora"]=""  # Theora has its own settings
@@ -232,12 +235,12 @@ print_banner() {
     echo -e "${CYAN}║   • Polaris (RX 400/500) • Vega • RDNA 1 • RDNA 2 • RDNA 3        ║${NC}" >&2
     echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series                                ║${NC}" >&2
     echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}" >&2
-    echo -e "${CYAN}║   • Zero-copy hardware pipeline (fixed VA-API)                     ║${NC}" >&2
+    echo -e "${CYAN}║   • Zero-copy hardware pipeline                                    ║${NC}" >&2
     echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}" >&2
     echo -e "${CYAN}║   • Flexible output formats: to mp4, to mkv, to avi                ║${NC}" >&2
     echo -e "${CYAN}║   • Auto-detection from command line                               ║${NC}" >&2
-    echo -e "${CYAN}║   • Automatic dependency installation (including bc)               ║${NC}" >&2
-    echo -e "${CYAN}║   • Fixed log output redirection (all logs to stderr)              ║${NC}" >&2
+    echo -e "${CYAN}║   • Fixed dry run output (no duplicates)                           ║${NC}" >&2
+    echo -e "${CYAN}║   • Enhanced HEVC VA-API compatibility                             ║${NC}" >&2
     echo -e "${CYAN}║                                                                   ║${NC}" >&2
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}" >&2
 }
@@ -313,24 +316,21 @@ print_usage() {
     echo -e "    # Install missing dependencies (requires sudo)" >&2
     echo -e "    sudo $SCRIPT_NAME --install-deps" >&2
     echo >&2
-    echo -e "    # Basic conversion with default MP4 output" >&2
-    echo -e "    $SCRIPT_NAME *.mkv" >&2
+    echo -e "    # Convert to MKV with HEVC codec" >&2
+    echo -e "    $SCRIPT_NAME -c hevc -p maxquality 1.mp4 to mkv" >&2
     echo >&2
-    echo -e "    # Convert to MKV format using to syntax" >&2
-    echo -e "    $SCRIPT_NAME *.mp4 to mkv" >&2
+    echo -e "    # Dry run to see command without executing" >&2
+    echo -e "    $SCRIPT_NAME --dry-run -c hevc 1.mp4 to mkv" >&2
     echo >&2
     echo -e "    # Convert VOB files to AVI with quality preset" >&2
     echo -e "    $SCRIPT_NAME --force-process -p dvd *.VOB to avi" >&2
-    echo >&2
-    echo -e "    # Dry run to see what would happen" >&2
-    echo -e "    $SCRIPT_NAME --dry-run *.mp4 to mkv" >&2
     echo >&2
     echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}" >&2
     echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability" >&2
     echo -e "    • Vega: Good B-frame support up to 2" >&2
     echo -e "    • RDNA 1 (RX 5000): Full B-frame support up to 3" >&2
     echo -e "    • RDNA 2 (RX 6000): Enhanced B-frame support up to 4" >&2
-    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 5" >&2
+    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 4 for HEVC" >&2
     echo >&2
     echo -e "${BLUE}Supported input formats:${NC} ${INPUT_EXTENSIONS[*]}" >&2
     echo -e "${BLUE}Supported output formats:${NC} ${!OUTPUT_FORMATS[*]}" >&2
@@ -1671,10 +1671,10 @@ process_file() {
     # Build FFmpeg command
     local cmd=$(build_ffmpeg_command "$input_file" "$output_file")
 
-    # Dry run mode
+    # Dry run mode - FIXED: Only output the command once, clearly labeled
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        echo -e "${YELLOW}[DRY RUN]${NC} $cmd" >&2
-        echo "$cmd"  # This goes to stdout for capture/display
+        echo -e "${YELLOW}[DRY RUN]${NC} FFmpeg command:" >&2
+        echo "$cmd"  # This goes to stdout for easy copy-paste
         return
     fi
 
@@ -1763,8 +1763,10 @@ main() {
     local detected_format=$(detect_output_format_from_args "$@")
     if [[ -n "$detected_format" ]]; then
         CONTAINER="$detected_format"
-        # Set default codec based on format
-        CODEC="${CODEC:-$(get_default_codec_for_format "$CONTAINER")}"
+        # Set default codec based on format, but don't override if user specified -c
+        if [[ -z "${CODEC:-}" ]]; then
+            CODEC="$(get_default_codec_for_format "$CONTAINER")"
+        fi
         log "INFO" "Detected output format: $CONTAINER (using $CODEC codec)"
 
         # Remove "to FORMAT" from arguments
