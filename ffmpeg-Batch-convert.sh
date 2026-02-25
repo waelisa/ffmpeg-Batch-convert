@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.1
+# Version: 1.1.2
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -22,16 +22,17 @@
 #   - Detailed logging and error handling
 #   - Interactive menu builder with gum
 #   - Configuration file support
+#   - Fixed unbound variable errors
+#   - Improved error handling for missing drivers
 #
 # Changelog:
-#   v1.1.1 - Added universal AMD GPU support (Polaris to RDNA 3)
-#          - AV1 encoding support for RX 7000 series
-#          - GPU architecture detection with B-frame safety
-#          - Zero-copy pipeline optimization
-#          - Enhanced HQVBR implementation
-#          - Mesa driver validation
-#          - Automatic AMF/VA-API fallback
-#   v1.1.0 - Fixed ANSI color codes, interactive menu, configuration files
+#   v1.1.2 - Fixed unbound variable errors (HAS_AV1_HW, HAS_HEVC_HW)
+#          - Improved error handling for missing VA-API drivers
+#          - Added better fallback messages
+#          - Fixed interactive menu with missing drivers
+#          - Added VA-API installation instructions
+#   v1.1.1 - Added universal AMD GPU support, AV1 encoding, smart B-frames
+#   v1.1.0 - Added interactive menu, configuration files
 #   v1.0.2 - Fixed color code formatting, Open GOP support
 #   v1.0.1 - Added VBAQ support, pre-analysis, B-frame optimization
 #   v1.0.0 - Initial release
@@ -44,7 +45,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.1"
+VERSION="1.1.2"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -67,6 +68,25 @@ DEFAULT_QUALITY="balanced"
 DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
 INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob")
+
+# Initialize variables with defaults
+DEBUG="${DEBUG:-false}"
+DRY_RUN="${DRY_RUN:-false}"
+NO_HWACCEL="${NO_HWACCEL:-false}"
+FORCE="${FORCE:-false}"
+KEEP_TREE="${KEEP_TREE:-false}"
+NO_VBAQ="${NO_VBAQ:-false}"
+NO_PREANALYSIS="${NO_PREANALYSIS:-false}"
+NO_OPENGOP="${NO_OPENGOP:-false}"
+TEXTURE_PRESERVE="${TEXTURE_PRESERVE:-false}"
+USE_AMF="${USE_AMF:-false}"
+HAS_VAAPI="${HAS_VAAPI:-false}"
+HAS_AMF="${HAS_AMF:-false}"
+HAS_HEVC_HW="${HAS_HEVC_HW:-false}"
+HAS_AV1_HW="${HAS_AV1_HW:-false}"
+HAS_OPEN_GOP="${HAS_OPEN_GOP:-false}"
+GPU_ARCHITECTURE="${GPU_ARCHITECTURE:-UNKNOWN}"
+RENDER_DEVICE="${RENDER_DEVICE:-}"
 
 # Resolution presets
 declare -A RESOLUTION_PRESETS=(
@@ -302,23 +322,23 @@ detect_gpu_architecture() {
     local gpu_model=$(get_amd_gpu_model)
     local architecture="UNKNOWN"
 
-    # Convert to uppercase for comparison
-    gpu_model=$(echo "$gpu_model" | tr '[:upper:]' '[:lower:]')
+    # Convert to lowercase for easier matching
+    local gpu_lower=$(echo "$gpu_model" | tr '[:upper:]' '[:lower:]')
 
     # Check for Polaris (RX 400/500 series)
-    if echo "$gpu_model" | grep -E "rx (4[0-9]{2}|5[0-9]{2})|polaris" &>/dev/null; then
+    if echo "$gpu_lower" | grep -E "rx (4[0-9]{2}|5[0-9]{2})|polaris" &>/dev/null; then
         architecture="POLARIS"
     # Check for Vega
-    elif echo "$gpu_model" | grep -E "vega|radeon vii" &>/dev/null; then
+    elif echo "$gpu_lower" | grep -E "vega|radeon vii" &>/dev/null; then
         architecture="VEGA"
     # Check for RDNA 1 (RX 5000 series)
-    elif echo "$gpu_model" | grep -E "rx 5[0-9]{3}|navi 1[0-9]" &>/dev/null; then
+    elif echo "$gpu_lower" | grep -E "rx 5[0-9]{3}|navi 1[0-9]|rdna1" &>/dev/null; then
         architecture="RDNA1"
     # Check for RDNA 2 (RX 6000 series)
-    elif echo "$gpu_model" | grep -E "rx 6[0-9]{3}|navi 2[0-9]|rdna2" &>/dev/null; then
+    elif echo "$gpu_lower" | grep -E "rx 6[0-9]{3}|navi 2[0-9]|rdna2" &>/dev/null; then
         architecture="RDNA2"
     # Check for RDNA 3 (RX 7000 series)
-    elif echo "$gpu_model" | grep -E "rx 7[0-9]{3}|navi 3[0-9]|rdna3" &>/dev/null; then
+    elif echo "$gpu_lower" | grep -E "rx 7[0-9]{3}|navi 3[0-9]|rdna3" &>/dev/null; then
         architecture="RDNA3"
     fi
 
@@ -330,7 +350,7 @@ check_av1_support() {
 
     # Only RDNA 3 (RX 7000 series) supports AV1 encoding
     if [[ "$architecture" == "RDNA3" ]]; then
-        # Check if AV1 encoder is available
+        # Check if AV1 encoder is available in FFmpeg
         if ffmpeg -encoders 2>/dev/null | grep -q "av1_amf\|av1_vaapi"; then
             return 0
         fi
@@ -363,17 +383,23 @@ get_safe_bframe_settings() {
 # ============================================
 
 detect_amd_gpu() {
-    if lspci | grep -i "vga.*amd" &>/dev/null || \
-       lspci | grep -i "vga.*ati" &>/dev/null || \
-       lspci | grep -i "display.*amd" &>/dev/null; then
-        return 0
+    if command -v lspci &>/dev/null; then
+        if lspci | grep -i "vga.*amd" &>/dev/null || \
+           lspci | grep -i "vga.*ati" &>/dev/null || \
+           lspci | grep -i "display.*amd" &>/dev/null; then
+            return 0
+        fi
     fi
     return 1
 }
 
 get_amd_gpu_model() {
-    lspci | grep -i "vga.*amd\|vga.*ati\|display.*amd" | \
-        sed -E 's/.*: (.*)/\1/' | head -1
+    if command -v lspci &>/dev/null; then
+        lspci | grep -i "vga.*amd\|vga.*ati\|display.*amd" | \
+            sed -E 's/.*: (.*)/\1/' | head -1
+    else
+        echo "Unknown"
+    fi
 }
 
 check_vaapi_support() {
@@ -431,8 +457,14 @@ get_render_device() {
     # Find the first AMD render device
     for device in /dev/dri/renderD*; do
         if [[ -e "$device" ]]; then
-            # Check if it's an AMD device
-            if udevadm info -a -n "$device" 2>/dev/null | grep -qi "amd\|ati"; then
+            # Check if it's an AMD device (if udevadm is available)
+            if command -v udevadm &>/dev/null; then
+                if udevadm info -a -n "$device" 2>/dev/null | grep -qi "amd\|ati"; then
+                    echo "$device"
+                    return 0
+                fi
+            else
+                # If udevadm not available, assume it's AMD
                 echo "$device"
                 return 0
             fi
@@ -480,6 +512,8 @@ display_gpu_info() {
             echo -e "${GREEN}Mesa Drivers:${NC} ✓ Installed"
         else
             echo -e "${YELLOW}Mesa Drivers:${NC} ✗ Not detected (may affect performance)"
+            echo -e "${YELLOW}  Install with: sudo apt install mesa-va-drivers (Ubuntu/Debian)${NC}"
+            echo -e "${YELLOW}  or: sudo dnf install mesa-va-drivers (Fedora)${NC}"
         fi
 
         # Check VA-API support
@@ -491,6 +525,7 @@ display_gpu_info() {
             done
         else
             echo -e "${YELLOW}VA-API:${NC} ✗ Not supported"
+            echo -e "${YELLOW}  Install VA-API drivers for your distribution${NC}"
         fi
 
         # Check AMF support
@@ -521,15 +556,21 @@ display_gpu_info() {
 detect_hardware_capabilities() {
     log "INFO" "Detecting hardware capabilities..."
 
+    # Initialize all capability variables
+    HAS_VAAPI=false
+    HAS_AMF=false
+    HAS_HEVC_HW=false
+    HAS_AV1_HW=false
+    HAS_OPEN_GOP=false
+    GPU_ARCHITECTURE="UNKNOWN"
+    RENDER_DEVICE=""
+
     # Check for AMD GPU
     if detect_amd_gpu; then
         local gpu_model=$(get_amd_gpu_model)
-        local architecture=$(detect_gpu_architecture)
+        GPU_ARCHITECTURE=$(detect_gpu_architecture)
         log "AMD" "AMD GPU detected: ${gpu_model:-Unknown model}"
-        log "AMD" "Architecture: $architecture"
-
-        # Store architecture for later use
-        GPU_ARCHITECTURE="$architecture"
+        log "AMD" "Architecture: $GPU_ARCHITECTURE"
 
         # Check for VA-API support
         if check_vaapi_support; then
@@ -548,8 +589,23 @@ detect_hardware_capabilities() {
             get_vaapi_profiles | while read line; do
                 log "DEBUG" "  $line"
             done
+
+            # Check for HEVC hardware support
+            if check_vaapi_encoding_support "hevc"; then
+                log "AMD" "✓ HEVC hardware encoding supported"
+                HAS_HEVC_HW=true
+            fi
+
+            # Check for AV1 support (RDNA 3 only)
+            if check_vaapi_encoding_support "av1"; then
+                log "AMD" "✓ AV1 hardware encoding supported"
+                HAS_AV1_HW=true
+            fi
         else
-            log "WARN" "VA-API not supported. Install mesa-va-drivers."
+            log "WARN" "VA-API not supported. Install mesa-va-drivers for your distribution."
+            log "WARN" "  Ubuntu/Debian: sudo apt install mesa-va-drivers"
+            log "WARN" "  Fedora: sudo dnf install mesa-va-drivers"
+            log "WARN" "  Arch: sudo pacman -S libva-mesa-driver"
             HAS_VAAPI=false
         fi
 
@@ -557,24 +613,17 @@ detect_hardware_capabilities() {
         if check_amf_support; then
             log "AMD" "✓ AMF encoder is available (proprietary path)"
             HAS_AMF=true
+
+            # Check AMF codec support
+            if check_amf_encoding_support "hevc"; then
+                HAS_HEVC_HW=true
+            fi
+            if check_amf_encoding_support "av1"; then
+                HAS_AV1_HW=true
+            fi
         else
             log "DEBUG" "AMF not available, using VA-API (open source path)"
             HAS_AMF=false
-        fi
-
-        # Check for HEVC hardware support
-        if check_vaapi_encoding_support "hevc"; then
-            log "AMD" "✓ HEVC hardware encoding supported"
-            HAS_HEVC_HW=true
-        else
-            log "DEBUG" "HEVC hardware encoding not available"
-            HAS_HEVC_HW=false
-        fi
-
-        # Check for AV1 support (RDNA 3 only)
-        if check_av1_support; then
-            log "AMD" "✓ AV1 hardware encoding supported (RDNA 3)"
-            HAS_AV1_HW=true
         fi
 
         # Check for Open GOP support
@@ -584,7 +633,7 @@ detect_hardware_capabilities() {
         fi
 
         # Show safe B-frame settings for this GPU
-        local safe_bframes=$(get_safe_bframe_settings "$architecture" "h264")
+        local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "h264")
         log "AMD" "Safe B-frame settings: $safe_bframes"
 
     else
@@ -593,6 +642,8 @@ detect_hardware_capabilities() {
         HAS_AMD=false
         HAS_VAAPI=false
         HAS_AMF=false
+        HAS_HEVC_HW=false
+        HAS_AV1_HW=false
     fi
 }
 
@@ -633,11 +684,16 @@ gpgkey=https://repo.charm.sh/yum/gpg.key' | tee /etc/yum.repos.d/charm.repo
             dnf install -y gum
             ;;
         pacman)
-            # For Arch
+            # For Arch - non-interactive install
             pacman -S --noconfirm gum
+            ;;
+        zypper)
+            # For openSUSE
+            zypper install -y gum
             ;;
         *)
             # Fallback: download binary directly
+            log "INFO" "Downloading gum binary directly..."
             local temp_dir=$(mktemp -d)
             cd "$temp_dir"
             wget -q "https://github.com/charmbracelet/gum/releases/download/v0.14.0/gum_0.14.0_Linux_x86_64.tar.gz"
@@ -677,7 +733,7 @@ interactive_menu() {
 
     # Codec selection (show AV1 only if supported)
     local codec_options=("h264" "hevc")
-    if [[ "$HAS_AV1_HW" == "true" ]]; then
+    if [[ "${HAS_AV1_HW:-false}" == "true" ]]; then
         codec_options+=("av1")
     fi
 
@@ -768,9 +824,10 @@ interactive_menu() {
     [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE"
     [[ -n "${QUALITY_VAL:-}" ]] && echo -e "  Quality: $QUALITY_VAL"
     echo -e "  Audio: $AUDIO_BITRATE"
-    [[ "$NO_VBAQ" == "true" ]] && echo -e "  VBAQ: Disabled" || echo -e "  VBAQ: Enabled"
-    [[ "$NO_PREANALYSIS" == "true" ]] && echo -e "  Pre-analysis: Disabled" || echo -e "  Pre-analysis: Enabled"
-    [[ "$TEXTURE_PRESERVE" == "true" ]] && echo -e "  Texture Preservation: Enabled"
+    [[ "${NO_VBAQ:-false}" == "true" ]] && echo -e "  VBAQ: Disabled" || echo -e "  VBAQ: Enabled"
+    [[ "${NO_PREANALYSIS:-false}" == "true" ]] && echo -e "  Pre-analysis: Disabled" || echo -e "  Pre-analysis: Enabled"
+    [[ "${NO_OPENGOP:-false}" == "true" ]] && echo -e "  Open GOP: Disabled" || echo -e "  Open GOP: Enabled"
+    [[ "${TEXTURE_PRESERVE:-false}" == "true" ]] && echo -e "  Texture Preservation: Enabled"
 
     if gum confirm "Start conversion with these settings?" --default=true; then
         # Continue to file selection
@@ -933,71 +990,71 @@ install_dependencies() {
         missing_deps+=("bc")
     fi
 
+    if [[ ${#missing_deps[@]} -eq 0 ]]; then
+        log "INFO" "All dependencies are already installed."
+    else
+        log "INFO" "Missing dependencies: ${missing_deps[*]}"
+
+        # Detect distribution and install packages
+        local distro=$(detect_distribution)
+        local pkg_manager=$(get_package_manager "$distro")
+
+        log "INFO" "Detected distribution: $distro"
+        log "INFO" "Using package manager: $pkg_manager"
+
+        # Check if running as root
+        if [[ $EUID -ne 0 ]]; then
+            log "WARN" "Dependencies need to be installed, but script is not running as root."
+            log "WARN" "Please run: sudo $0 --install-deps"
+            return 1
+        fi
+
+        # Install packages based on distribution
+        case "$pkg_manager" in
+            apt)
+                log "INFO" "Updating package lists..."
+                apt update
+                log "INFO" "Installing FFmpeg and VA-API packages..."
+                apt install -y ffmpeg vainfo mesa-va-drivers \
+                    libva-drm2 libva-x11-2 va-driver-all \
+                    mesa-utils pciutils bc wget
+                ;;
+
+            dnf)
+                log "INFO" "Installing FFmpeg and VA-API packages..."
+                # Enable RPM Fusion if needed
+                if ! rpm -q rpmfusion-free-release &>/dev/null; then
+                    dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
+                fi
+                dnf install -y ffmpeg ffmpeg-libs vainfo \
+                    mesa-va-drivers libva-utils pciutils bc wget
+                ;;
+
+            pacman)
+                log "INFO" "Installing FFmpeg and VA-API packages..."
+                pacman -S --noconfirm ffmpeg libva-utils \
+                    mesa-utils libva-mesa-driver pciutils bc wget
+                ;;
+
+            zypper)
+                log "INFO" "Installing FFmpeg and VA-API packages..."
+                zypper install -y ffmpeg vainfo \
+                    libva-utils Mesa-dri pciutils bc wget
+                ;;
+
+            *)
+                log "ERROR" "Unsupported distribution for automatic installation"
+                return 1
+                ;;
+        esac
+    fi
+
+    # Install gum separately if needed
     if ! check_command "gum"; then
         install_gum
     fi
 
-    if [[ ${#missing_deps[@]} -eq 0 ]]; then
-        log "INFO" "All dependencies are already installed."
-        return 0
-    fi
-
-    log "INFO" "Missing dependencies: ${missing_deps[*]}"
-
-    # Detect distribution and install packages
-    local distro=$(detect_distribution)
-    local pkg_manager=$(get_package_manager "$distro")
-
-    log "INFO" "Detected distribution: $distro"
-    log "INFO" "Using package manager: $pkg_manager"
-
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        log "WARN" "Dependencies need to be installed, but script is not running as root."
-        log "WARN" "Please run: sudo $0 --install-deps"
-        return 1
-    fi
-
-    # Install packages based on distribution
-    case "$pkg_manager" in
-        apt)
-            log "INFO" "Updating package lists..."
-            apt update
-            log "INFO" "Installing FFmpeg and VA-API packages..."
-            apt install -y ffmpeg vainfo mesa-va-drivers \
-                libva-drm2 libva-x11-2 va-driver-all \
-                mesa-utils pciutils bc wget
-            ;;
-
-        dnf)
-            log "INFO" "Installing FFmpeg and VA-API packages..."
-            # Enable RPM Fusion if needed
-            if ! rpm -q rpmfusion-free-release &>/dev/null; then
-                dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
-            fi
-            dnf install -y ffmpeg ffmpeg-libs vainfo \
-                mesa-va-drivers libva-utils pciutils bc wget
-            ;;
-
-        pacman)
-            log "INFO" "Installing FFmpeg and VA-API packages..."
-            pacman -S --noconfirm ffmpeg libva-utils \
-                mesa-utils libva-mesa-driver pciutils bc wget
-            ;;
-
-        zypper)
-            log "INFO" "Installing FFmpeg and VA-API packages..."
-            zypper install -y ffmpeg vainfo \
-                libva-utils Mesa-dri pciutils bc wget
-            ;;
-
-        *)
-            log "ERROR" "Unsupported distribution for automatic installation"
-            return 1
-            ;;
-    esac
-
-    log "INFO" "Dependencies installed successfully."
+    log "INFO" "Dependencies installation completed."
 }
 
 # ============================================
@@ -1068,12 +1125,12 @@ build_ffmpeg_command() {
     fi
 
     # Hardware acceleration setup with zero-copy pipeline
-    if [[ "${NO_HWACCEL:-false}" != "true" ]] && [[ "$HAS_VAAPI" == "true" ]]; then
+    if [[ "${NO_HWACCEL:-false}" != "true" ]] && [[ "${HAS_VAAPI:-false}" == "true" ]]; then
         local driver_info=$(get_amd_driver_info)
         log "DEBUG" "Using AMD driver: $driver_info"
 
         # Try AMF first if available and codec supports it
-        if [[ "$USE_AMF" == "true" ]] && [[ "$HAS_AMF" == "true" ]] && check_amf_encoding_support "$CODEC"; then
+        if [[ "${USE_AMF:-false}" == "true" ]] && [[ "${HAS_AMF:-false}" == "true" ]] && check_amf_encoding_support "$CODEC"; then
             # AMF encoding path with zero-copy
             log "AMD" "Using AMF hardware encoding pipeline (zero-copy)"
             cmd+=" -hwaccel vaapi -hwaccel_device $RENDER_DEVICE -hwaccel_output_format vaapi"
@@ -1193,7 +1250,7 @@ build_ffmpeg_command() {
     fi
 
     # CPU encoding fallback with optimizations
-    if [[ "${NO_HWACCEL:-false}" == "true" ]] || [[ "$HAS_VAAPI" != "true" ]]; then
+    if [[ "${NO_HWACCEL:-false}" == "true" ]] || [[ "${HAS_VAAPI:-false}" != "true" ]]; then
         log "INFO" "Using CPU encoding"
         cmd+=" -i \"$input_file\""
 
@@ -1606,7 +1663,7 @@ main() {
     detect_hardware_capabilities
 
     # Check AV1 support if selected
-    if [[ "$CODEC" == "av1" ]] && [[ "$HAS_AV1_HW" != "true" ]]; then
+    if [[ "$CODEC" == "av1" ]] && [[ "${HAS_AV1_HW:-false}" != "true" ]]; then
         log "WARN" "AV1 encoding not supported on this GPU. Falling back to HEVC."
         CODEC="hevc"
     fi
@@ -1617,11 +1674,11 @@ main() {
         log "INFO" "Hardware acceleration disabled, using CPU encoding"
     else
         # Try AMF first for H.264/HEVC
-        if [[ "$HAS_AMF" == "true" ]] && check_amf_encoding_support "$CODEC"; then
+        if [[ "${HAS_AMF:-false}" == "true" ]] && check_amf_encoding_support "$CODEC"; then
             USE_AMF=true
             log "AMD" "Using AMF hardware encoding (proprietary driver path)"
         # Then try VA-API
-        elif [[ "$HAS_VAAPI" == "true" ]] && check_vaapi_encoding_support "$CODEC"; then
+        elif [[ "${HAS_VAAPI:-false}" == "true" ]] && check_vaapi_encoding_support "$CODEC"; then
             USE_AMF=false
             log "AMD" "Using VA-API hardware encoding (open source driver path)"
         else
@@ -1632,7 +1689,7 @@ main() {
     fi
 
     # Show GPU architecture specific settings
-    if [[ -n "${GPU_ARCHITECTURE:-}" ]]; then
+    if [[ -n "${GPU_ARCHITECTURE:-}" ]] && [[ "$GPU_ARCHITECTURE" != "UNKNOWN" ]]; then
         log "AMD" "GPU Architecture: $GPU_ARCHITECTURE"
         local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")
         log "AMD" "Using B-frame settings: $safe_bframes"
@@ -1646,10 +1703,10 @@ main() {
     [[ -n "${SCALE:-}" ]] && log "INFO" "  • Resolution: $SCALE"
     [[ -n "${TARGET_SIZE:-}" ]] && log "INFO" "  • Target size: $TARGET_SIZE"
     log "INFO" "  • Audio bitrate: $AUDIO_BITRATE"
-    [[ "$NO_VBAQ" == "true" ]] && log "INFO" "  • VBAQ: Disabled" || [[ -n "${NO_VBAQ:-}" ]] && log "INFO" "  • VBAQ: Enabled"
-    [[ "$NO_PREANALYSIS" == "true" ]] && log "INFO" "  • Pre-analysis: Disabled" || [[ -n "${NO_PREANALYSIS:-}" ]] && log "INFO" "  • Pre-analysis: Enabled"
-    [[ "$NO_OPENGOP" == "true" ]] && log "INFO" "  • Open GOP: Disabled" || [[ -n "${NO_OPENGOP:-}" ]] && log "INFO" "  • Open GOP: Enabled"
-    [[ "$TEXTURE_PRESERVE" == "true" ]] && log "INFO" "  • Texture preservation: Enabled"
+    [[ "${NO_VBAQ:-false}" == "true" ]] && log "INFO" "  • VBAQ: Disabled" || log "INFO" "  • VBAQ: Enabled"
+    [[ "${NO_PREANALYSIS:-false}" == "true" ]] && log "INFO" "  • Pre-analysis: Disabled" || log "INFO" "  • Pre-analysis: Enabled"
+    [[ "${NO_OPENGOP:-false}" == "true" ]] && log "INFO" "  • Open GOP: Disabled" || log "INFO" "  • Open GOP: Enabled"
+    [[ "${TEXTURE_PRESERVE:-false}" == "true" ]] && log "INFO" "  • Texture preservation: Enabled"
 
     # Process files
     process_files "${files[@]}"
