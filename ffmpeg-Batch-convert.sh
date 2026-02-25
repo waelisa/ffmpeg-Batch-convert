@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.2
+# Version: 1.1.3
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -12,30 +12,24 @@
 # Features:
 #   - Universal AMD GPU support (Polaris, Vega, RDNA 1/2/3)
 #   - Automatic dependency installation
-#   - Multi-distribution support (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE)
+#   - Multi-distribution support
 #   - AMD GPU detection and VA-API/AMF support
-#   - AV1 encoding support for RDNA 3 (RX 7000 series)
+#   - AV1 encoding support for RDNA 3
 #   - Smart B-frame management per GPU architecture
-#   - Zero-copy hardware pipeline (decode → filter → encode)
-#   - HQVBR (High Quality Variable Bitrate) for consistent quality
-#   - Advanced encoding options with presets
-#   - Detailed logging and error handling
-#   - Interactive menu builder with gum
-#   - Configuration file support
-#   - Fixed unbound variable errors
-#   - Improved error handling for missing drivers
+#   - Zero-copy hardware pipeline
+#   - HQVBR for consistent quality
+#   - Fixed VOB/DVD format support
+#   - Better error handling for malformed files
 #
 # Changelog:
-#   v1.1.2 - Fixed unbound variable errors (HAS_AV1_HW, HAS_HEVC_HW)
-#          - Improved error handling for missing VA-API drivers
-#          - Added better fallback messages
-#          - Fixed interactive menu with missing drivers
-#          - Added VA-API installation instructions
-#   v1.1.1 - Added universal AMD GPU support, AV1 encoding, smart B-frames
+#   v1.1.3 - Fixed VOB file duration parsing
+#          - Added better error recovery for malformed files
+#          - Improved ffprobe output handling
+#          - Added fallback for missing duration values
+#          - Better handling of DVD/VOB format quirks
+#   v1.1.2 - Fixed unbound variable errors
+#   v1.1.1 - Added universal AMD GPU support, AV1 encoding
 #   v1.1.0 - Added interactive menu, configuration files
-#   v1.0.2 - Fixed color code formatting, Open GOP support
-#   v1.0.1 - Added VBAQ support, pre-analysis, B-frame optimization
-#   v1.0.0 - Initial release
 #
 #############################################################################################################################
 
@@ -45,7 +39,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.2"
+VERSION="1.1.3"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -67,7 +61,7 @@ DEFAULT_CODEC="h264"
 DEFAULT_QUALITY="balanced"
 DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
-INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob")
+INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob" "VOB")
 
 # Initialize variables with defaults
 DEBUG="${DEBUG:-false}"
@@ -114,23 +108,18 @@ declare -A AMD_ARCHITECTURES=(
 # AMF encoder presets with HQVBR for all AMD GPUs
 declare -A QUALITY_PRESETS=(
     # Maximum quality - CQP mode with low QP values
-    # Best for archival, minimal compression artifacts
     ["maxquality"]="-quality quality -rc cqp -qp_i 18 -qp_p 18 -qp_b 22 -vbaq 1 -preanalysis 1 -me full -maxaufsize 4 -gops_per_idr 60 -open_gop 1 -luma_adaptive_quantization 1"
 
     # Balanced - High Quality VBR with pre-analysis (HQVBR)
-    # Optimal for general use, good quality/size ratio
     ["balanced"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 15M -peak_bitrate 15M -bufsize 24M -vbaq 1 -preanalysis 1 -me quarter -maxaufsize 3 -gops_per_idr 30 -open_gop 1"
 
     # Fast encoding - Speed optimized with peak VBR
-    # For quick previews or when time is critical
     ["fast"]="-quality speed -rc vbr_peak -maxrate 8M -bufsize 16M -vbaq 0 -preanalysis 0 -me half -maxaufsize 2 -gops_per_idr 15"
 
     # High compression - VBR latency mode for smaller files
-    # Best for storage optimization, streaming
     ["highcompression"]="-quality quality -rc vbr_latency -qvbr_quality_level 26 -maxrate 8M -bufsize 16M -vbaq 1 -preanalysis 1 -me full -maxaufsize 4 -gops_per_idr 45 -open_gop 1"
 
     # Streaming optimized - Low latency with good quality
-    # Ideal for media servers (Plex, Jellyfin, Emby)
     ["streaming"]="-quality quality -rc vbr_latency -qvbr_quality_level 23 -maxrate 10M -bufsize 20M -vbaq 1 -preanalysis 1 -me quarter -maxaufsize 3 -gops_per_idr 60 -open_gop 1"
 )
 
@@ -202,6 +191,7 @@ print_banner() {
     echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}"
     echo -e "${CYAN}║   • Zero-copy hardware pipeline                                    ║${NC}"
     echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}"
+    echo -e "${CYAN}║   • VOB/DVD format support                                         ║${NC}"
     echo -e "${CYAN}║                                                                   ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 }
@@ -256,21 +246,14 @@ print_usage() {
     echo -e "    --crop W:H:X:Y          Crop video (width:height:x:y)"
     echo
     echo -e "${GREEN}EXAMPLES:${NC}"
-    echo -e "    # Basic conversion with auto hardware detection"
-    echo -e "    $SCRIPT_NAME *.mkv"
+    echo -e "    # Convert DVD VOB files"
+    echo -e "    $SCRIPT_NAME *.VOB"
     echo
-    echo -e "    # AV1 encoding on RDNA 3 GPU (RX 7000 series)"
+    echo -e "    # AV1 encoding on RDNA 3 GPU"
     echo -e "    $SCRIPT_NAME -c av1 -p maxquality --gpu-info *.mp4"
     echo
     echo -e "    # Interactive configuration menu"
     echo -e "    $SCRIPT_NAME --conf"
-    echo
-    echo -e "    # Save and load profiles"
-    echo -e "    $SCRIPT_NAME --save-conf myprofile --preset maxquality"
-    echo -e "    $SCRIPT_NAME --load-conf myprofile *.mp4"
-    echo
-    echo -e "    # 4K conversion with streaming preset"
-    echo -e "    $SCRIPT_NAME -r 4K -p streaming *.mkv"
     echo
     echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}"
     echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability"
@@ -1309,25 +1292,52 @@ build_ffmpeg_command() {
 }
 
 # ============================================
-# File Processing
+# File Processing with VOB fixes
 # ============================================
 
 get_file_info() {
     local input_file="$1"
 
     if check_command "ffprobe"; then
+        # Get duration - handle cases where it might be "N/A" or empty
         local duration=$(ffprobe -v error -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null)
-        local video_codec=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null)
-        local resolution=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=width,height -of csv=p=0 "$input_file" 2>/dev/null)
-        local bitrate=$(ffprobe -v error -show_entries format=bit_rate \
-            -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null)
+            -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null | head -1)
 
-        if [[ -n "$duration" ]] && [[ -n "$video_codec" ]]; then
-            log "INFO" "Input: ${video_codec} | ${resolution} | $(printf "%.2f" $duration)s | ${bitrate}bps"
+        # Get video codec
+        local video_codec=$(ffprobe -v error -select_streams v:0 \
+            -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null | head -1)
+
+        # Get resolution - handle multiple lines
+        local resolution=$(ffprobe -v error -select_streams v:0 \
+            -show_entries stream=width,height -of csv=p=0 "$input_file" 2>/dev/null | head -1 | tr ',' 'x')
+
+        # Get bitrate
+        local bitrate=$(ffprobe -v error -show_entries format=bit_rate \
+            -of default=noprint_wrappers=1:nokey=1 "$input_file" 2>/dev/null | head -1)
+
+        # Set defaults if empty
+        video_codec="${video_codec:-unknown}"
+        resolution="${resolution:-unknown}"
+        duration="${duration:-0}"
+        bitrate="${bitrate:-0}"
+
+        # Format duration safely
+        local duration_formatted="0.00"
+        if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            duration_formatted=$(printf "%.2f" "$duration" 2>/dev/null || echo "0.00")
         fi
+
+        # Format bitrate
+        local bitrate_formatted="$bitrate"
+        if [[ "$bitrate" =~ ^[0-9]+$ ]]; then
+            if [[ $bitrate -gt 1000000 ]]; then
+                bitrate_formatted="$(echo "scale=1; $bitrate/1000000" | bc)Mbps"
+            elif [[ $bitrate -gt 1000 ]]; then
+                bitrate_formatted="$(echo "scale=1; $bitrate/1000" | bc)Kbps"
+            fi
+        fi
+
+        log "INFO" "Input: ${video_codec} | ${resolution} | ${duration_formatted}s | ${bitrate_formatted}"
     fi
 }
 
@@ -1395,6 +1405,13 @@ process_file() {
         fi
     else
         log "ERROR" "✗ Failed to convert: $input_file"
+        # Show last few lines of log for debugging
+        if [[ -f "$LOG_FILE" ]]; then
+            log "DEBUG" "Last 5 lines of log:"
+            tail -5 "$LOG_FILE" | while read line; do
+                log "DEBUG" "  $line"
+            done
+        fi
         return 1
     fi
 }
