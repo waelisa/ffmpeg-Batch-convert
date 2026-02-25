@@ -4,32 +4,31 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.6
+# Version: 1.1.7
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
 #
 # Features:
 #   - Universal AMD GPU support (Polaris, Vega, RDNA 1/2/3)
-#   - Automatic dependency installation (including bc calculator)
-#   - Multi-distribution support (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE)
+#   - Automatic dependency installation
+#   - Multi-distribution support
 #   - AMD GPU detection and VA-API/AMF support
 #   - AV1 encoding support for RDNA 3
 #   - Smart B-frame management per GPU architecture
-#   - Zero-copy hardware pipeline (fixed VA-API command construction)
+#   - Zero-copy hardware pipeline (fixed VA-API)
 #   - HQVBR for consistent quality
-#   - Advanced VOB/DVD format support with forced processing
 #   - Flexible output formats: to mp4, to mkv, to avi
 #   - Auto-detection from command line
-#   - Comprehensive dependency checking with clear installation notes
+#   - Fixed log output redirection (all logs to stderr)
+#   - Clean command capture without debug messages
 #
 # Changelog:
-#   v1.1.6 - Fixed VA-API command construction (duplicate -i flag)
-#          - Added bc dependency check and auto-install
-#          - Improved hardware pipeline with proper filter chain
-#          - Better error messages for missing dependencies
-#          - Added --check-deps flag to verify all requirements
-#          - Enhanced --install-deps to ensure bc is installed
+#   v1.1.7 - Fixed log output redirection to stderr
+#          - Ensures clean command capture without debug text
+#          - All log messages now go to stderr, not stdout
+#          - Prevents log messages from being captured in command string
+#   v1.1.6 - Fixed VA-API command construction, added bc dependency
 #   v1.1.5 - Added "to [format]" syntax support
 #   v1.1.4 - Fixed VOB file duration issues, added DVD preset
 #   v1.1.3 - Fixed VOB file duration parsing
@@ -45,7 +44,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.6"
+VERSION="1.1.7"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -222,138 +221,142 @@ declare -A TEXTURE_SETTINGS=(
 # ============================================
 
 print_banner() {
-    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║                                                                   ║${NC}"
-    echo -e "${CYAN}║   Advanced AMD GPU Batch Video Converter v${VERSION}                    ║${NC}"
-    echo -e "${CYAN}║   Wael Isa - www.wael.name                                        ║${NC}"
-    echo -e "${CYAN}║   GitHub: https://github.com/waelisa/ffmpeg-Batch-convert         ║${NC}"
-    echo -e "${CYAN}║                                                                   ║${NC}"
-    echo -e "${CYAN}║   Universal AMD GPU Support:                                       ║${NC}"
-    echo -e "${CYAN}║   • Polaris (RX 400/500) • Vega • RDNA 1 • RDNA 2 • RDNA 3        ║${NC}"
-    echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series                                ║${NC}"
-    echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}"
-    echo -e "${CYAN}║   • Zero-copy hardware pipeline (fixed VA-API)                     ║${NC}"
-    echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}"
-    echo -e "${CYAN}║   • Flexible output formats: to mp4, to mkv, to avi                ║${NC}"
-    echo -e "${CYAN}║   • Auto-detection from command line                               ║${NC}"
-    echo -e "${CYAN}║   • Automatic dependency installation (including bc)               ║${NC}"
-    echo -e "${CYAN}║                                                                   ║${NC}"
-    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    # Banner goes to stderr as well to keep stdout clean
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${CYAN}║                                                                   ║${NC}" >&2
+    echo -e "${CYAN}║   Advanced AMD GPU Batch Video Converter v${VERSION}                    ║${NC}" >&2
+    echo -e "${CYAN}║   Wael Isa - www.wael.name                                        ║${NC}" >&2
+    echo -e "${CYAN}║   GitHub: https://github.com/waelisa/ffmpeg-Batch-convert         ║${NC}" >&2
+    echo -e "${CYAN}║                                                                   ║${NC}" >&2
+    echo -e "${CYAN}║   Universal AMD GPU Support:                                       ║${NC}" >&2
+    echo -e "${CYAN}║   • Polaris (RX 400/500) • Vega • RDNA 1 • RDNA 2 • RDNA 3        ║${NC}" >&2
+    echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series                                ║${NC}" >&2
+    echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}" >&2
+    echo -e "${CYAN}║   • Zero-copy hardware pipeline (fixed VA-API)                     ║${NC}" >&2
+    echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}" >&2
+    echo -e "${CYAN}║   • Flexible output formats: to mp4, to mkv, to avi                ║${NC}" >&2
+    echo -e "${CYAN}║   • Auto-detection from command line                               ║${NC}" >&2
+    echo -e "${CYAN}║   • Automatic dependency installation (including bc)               ║${NC}" >&2
+    echo -e "${CYAN}║   • Fixed log output redirection (all logs to stderr)              ║${NC}" >&2
+    echo -e "${CYAN}║                                                                   ║${NC}" >&2
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}" >&2
 }
 
 print_usage() {
-    echo -e "${GREEN}USAGE:${NC}"
-    echo -e "    $SCRIPT_NAME [OPTIONS] [FILES...] [to FORMAT]"
-    echo
-    echo -e "${GREEN}OPTIONS:${NC}"
-    echo -e "    -h, --help              Show this help message"
-    echo -e "    -v, --version           Show version information"
-    echo -e "    -d, --debug             Enable debug output"
-    echo -e "    --dry-run              Show commands without executing"
-    echo -e "    --check-deps           Check if all dependencies are installed"
-    echo -e "    --install-deps         Install required dependencies (run as root)"
-    echo -e "    --conf                 Interactive configuration menu"
-    echo -e "    --save-conf NAME       Save current settings as profile"
-    echo -e "    --load-conf NAME       Load profile"
-    echo -e "    --list-conf            List available profiles"
-    echo -e "    --gpu-info             Display detailed GPU information"
-    echo -e "    --force-process        Force processing even with malformed files"
-    echo
-    echo -e "${YELLOW}Output Options:${NC}"
-    echo -e "    -o, --output DIR        Output directory (default: ./output)"
-    echo -e "    -c, --codec CODEC       Video codec: h264, hevc, av1, vp9, theora"
-    echo -e "                            (default: auto-detected from format)"
-    echo -e "    -p, --preset PRESET     Quality preset: "
-    echo -e "                            • maxquality - Maximum quality (largest files)"
-    echo -e "                            • balanced  - Good quality/size balance"
-    echo -e "                            • fast      - Fastest encoding"
-    echo -e "                            • highcompression - Smallest files"
-    echo -e "                            • streaming - Optimized for media servers"
-    echo -e "                            • dvd       - Optimized for DVD/VOB files"
-    echo -e "                            (default: balanced)"
-    echo -e "    -q, --quality VAL       Quality override (16-32, lower = better)"
-    echo -e "    -a, --audio-bitrate R   Audio bitrate (default: 128k)"
-    echo -e "    -f, --format EXT        Output container (default: mp4)"
-    echo -e "    -r, --resolution PRESET Resolution preset: 480p, 720p, 1080p, 2K, 4K, 8K"
-    echo
-    echo -e "${YELLOW}Output Format Shortcuts:${NC}"
-    echo -e "    to mp4                  Convert to MP4 format"
-    echo -e "    to mkv                  Convert to MKV format"
-    echo -e "    to avi                  Convert to AVI format"
-    echo -e "    to webm                 Convert to WebM format"
-    echo -e "    to mov                  Convert to MOV format"
-    echo -e "    to m4v                  Convert to M4V format"
-    echo -e "    to 3gp                  Convert to 3GP format"
-    echo -e "    to ogv                  Convert to OGV format"
-    echo
-    echo -e "${YELLOW}Processing Options:${NC}"
-    echo -e "    --keep-tree             Preserve directory structure"
-    echo -e "    --no-hwaccel            Disable hardware acceleration (CPU only)"
-    echo -e "    --force                 Overwrite existing files"
-    echo -e "    --no-vbaq               Disable Variance Based Adaptive Quantization"
-    echo -e "    --no-preanalysis        Disable pre-analysis (faster but lower quality)"
-    echo -e "    --no-opengop            Disable Open GOP (better compatibility)"
-    echo -e "    --texture-preserve      Maximum texture detail preservation"
-    echo -e "    --target-size SIZE      Target file size (e.g., 100M, 1G)"
-    echo
-    echo -e "${YELLOW}Filter Options:${NC}"
-    echo -e "    --scale WxH             Scale video (e.g., 1920x1080, -1x720 for height 720)"
-    echo -e "    --fps FPS               Set output framerate"
-    echo -e "    --trim START:DURATION   Trim video (e.g., 00:01:00:30 for 1m30s)"
-    echo -e "    --deinterlace           Force deinterlacing (auto-enabled for VOB)"
-    echo -e "    --denoise LEVEL         Apply denoising (low, medium, high)"
-    echo -e "    --crop W:H:X:Y          Crop video (width:height:x:y)"
-    echo
-    echo -e "${GREEN}EXAMPLES:${NC}"
-    echo -e "    # Check dependencies first"
-    echo -e "    $SCRIPT_NAME --check-deps"
-    echo
-    echo -e "    # Install missing dependencies (requires sudo)"
-    echo -e "    sudo $SCRIPT_NAME --install-deps"
-    echo
-    echo -e "    # Basic conversion with default MP4 output"
-    echo -e "    $SCRIPT_NAME *.mkv"
-    echo
-    echo -e "    # Convert to MKV format using to syntax"
-    echo -e "    $SCRIPT_NAME *.mp4 to mkv"
-    echo
-    echo -e "    # Convert VOB files to AVI with quality preset"
-    echo -e "    $SCRIPT_NAME --force-process -p dvd *.VOB to avi"
-    echo
-    echo -e "    # Dry run to see what would happen"
-    echo -e "    $SCRIPT_NAME --dry-run *.mp4 to mkv"
-    echo
-    echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}"
-    echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability"
-    echo -e "    • Vega: Good B-frame support up to 2"
-    echo -e "    • RDNA 1 (RX 5000): Full B-frame support up to 3"
-    echo -e "    • RDNA 2 (RX 6000): Enhanced B-frame support up to 4"
-    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 5"
-    echo
-    echo -e "${BLUE}Supported input formats:${NC} ${INPUT_EXTENSIONS[*]}"
-    echo -e "${BLUE}Supported output formats:${NC} ${!OUTPUT_FORMATS[*]}"
+    # Usage goes to stderr
+    echo -e "${GREEN}USAGE:${NC}" >&2
+    echo -e "    $SCRIPT_NAME [OPTIONS] [FILES...] [to FORMAT]" >&2
+    echo >&2
+    echo -e "${GREEN}OPTIONS:${NC}" >&2
+    echo -e "    -h, --help              Show this help message" >&2
+    echo -e "    -v, --version           Show version information" >&2
+    echo -e "    -d, --debug             Enable debug output" >&2
+    echo -e "    --dry-run              Show commands without executing" >&2
+    echo -e "    --check-deps           Check if all dependencies are installed" >&2
+    echo -e "    --install-deps         Install required dependencies (run as root)" >&2
+    echo -e "    --conf                 Interactive configuration menu" >&2
+    echo -e "    --save-conf NAME       Save current settings as profile" >&2
+    echo -e "    --load-conf NAME       Load profile" >&2
+    echo -e "    --list-conf            List available profiles" >&2
+    echo -e "    --gpu-info             Display detailed GPU information" >&2
+    echo -e "    --force-process        Force processing even with malformed files" >&2
+    echo >&2
+    echo -e "${YELLOW}Output Options:${NC}" >&2
+    echo -e "    -o, --output DIR        Output directory (default: ./output)" >&2
+    echo -e "    -c, --codec CODEC       Video codec: h264, hevc, av1, vp9, theora" >&2
+    echo -e "                            (default: auto-detected from format)" >&2
+    echo -e "    -p, --preset PRESET     Quality preset: " >&2
+    echo -e "                            • maxquality - Maximum quality (largest files)" >&2
+    echo -e "                            • balanced  - Good quality/size balance" >&2
+    echo -e "                            • fast      - Fastest encoding" >&2
+    echo -e "                            • highcompression - Smallest files" >&2
+    echo -e "                            • streaming - Optimized for media servers" >&2
+    echo -e "                            • dvd       - Optimized for DVD/VOB files" >&2
+    echo -e "                            (default: balanced)" >&2
+    echo -e "    -q, --quality VAL       Quality override (16-32, lower = better)" >&2
+    echo -e "    -a, --audio-bitrate R   Audio bitrate (default: 128k)" >&2
+    echo -e "    -f, --format EXT        Output container (default: mp4)" >&2
+    echo -e "    -r, --resolution PRESET Resolution preset: 480p, 720p, 1080p, 2K, 4K, 8K" >&2
+    echo >&2
+    echo -e "${YELLOW}Output Format Shortcuts:${NC}" >&2
+    echo -e "    to mp4                  Convert to MP4 format" >&2
+    echo -e "    to mkv                  Convert to MKV format" >&2
+    echo -e "    to avi                  Convert to AVI format" >&2
+    echo -e "    to webm                 Convert to WebM format" >&2
+    echo -e "    to mov                  Convert to MOV format" >&2
+    echo -e "    to m4v                  Convert to M4V format" >&2
+    echo -e "    to 3gp                  Convert to 3GP format" >&2
+    echo -e "    to ogv                  Convert to OGV format" >&2
+    echo >&2
+    echo -e "${YELLOW}Processing Options:${NC}" >&2
+    echo -e "    --keep-tree             Preserve directory structure" >&2
+    echo -e "    --no-hwaccel            Disable hardware acceleration (CPU only)" >&2
+    echo -e "    --force                 Overwrite existing files" >&2
+    echo -e "    --no-vbaq               Disable Variance Based Adaptive Quantization" >&2
+    echo -e "    --no-preanalysis        Disable pre-analysis (faster but lower quality)" >&2
+    echo -e "    --no-opengop            Disable Open GOP (better compatibility)" >&2
+    echo -e "    --texture-preserve      Maximum texture detail preservation" >&2
+    echo -e "    --target-size SIZE      Target file size (e.g., 100M, 1G)" >&2
+    echo >&2
+    echo -e "${YELLOW}Filter Options:${NC}" >&2
+    echo -e "    --scale WxH             Scale video (e.g., 1920x1080, -1x720 for height 720)" >&2
+    echo -e "    --fps FPS               Set output framerate" >&2
+    echo -e "    --trim START:DURATION   Trim video (e.g., 00:01:00:30 for 1m30s)" >&2
+    echo -e "    --deinterlace           Force deinterlacing (auto-enabled for VOB)" >&2
+    echo -e "    --denoise LEVEL         Apply denoising (low, medium, high)" >&2
+    echo -e "    --crop W:H:X:Y          Crop video (width:height:x:y)" >&2
+    echo >&2
+    echo -e "${GREEN}EXAMPLES:${NC}" >&2
+    echo -e "    # Check dependencies first" >&2
+    echo -e "    $SCRIPT_NAME --check-deps" >&2
+    echo >&2
+    echo -e "    # Install missing dependencies (requires sudo)" >&2
+    echo -e "    sudo $SCRIPT_NAME --install-deps" >&2
+    echo >&2
+    echo -e "    # Basic conversion with default MP4 output" >&2
+    echo -e "    $SCRIPT_NAME *.mkv" >&2
+    echo >&2
+    echo -e "    # Convert to MKV format using to syntax" >&2
+    echo -e "    $SCRIPT_NAME *.mp4 to mkv" >&2
+    echo >&2
+    echo -e "    # Convert VOB files to AVI with quality preset" >&2
+    echo -e "    $SCRIPT_NAME --force-process -p dvd *.VOB to avi" >&2
+    echo >&2
+    echo -e "    # Dry run to see what would happen" >&2
+    echo -e "    $SCRIPT_NAME --dry-run *.mp4 to mkv" >&2
+    echo >&2
+    echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}" >&2
+    echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability" >&2
+    echo -e "    • Vega: Good B-frame support up to 2" >&2
+    echo -e "    • RDNA 1 (RX 5000): Full B-frame support up to 3" >&2
+    echo -e "    • RDNA 2 (RX 6000): Enhanced B-frame support up to 4" >&2
+    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 5" >&2
+    echo >&2
+    echo -e "${BLUE}Supported input formats:${NC} ${INPUT_EXTENSIONS[*]}" >&2
+    echo -e "${BLUE}Supported output formats:${NC} ${!OUTPUT_FORMATS[*]}" >&2
 }
 
 print_version() {
-    echo "Advanced AMD GPU Batch Video Converter v${VERSION}"
-    echo "Wael Isa - www.wael.name"
-    echo "GitHub: https://github.com/waelisa/ffmpeg-Batch-convert"
-    echo "Universal AMD GPU Support (Polaris → RDNA 3)"
+    echo "Advanced AMD GPU Batch Video Converter v${VERSION}" >&2
+    echo "Wael Isa - www.wael.name" >&2
+    echo "GitHub: https://github.com/waelisa/ffmpeg-Batch-convert" >&2
+    echo "Universal AMD GPU Support (Polaris → RDNA 3)" >&2
 }
 
+# FIXED: All log output now goes to stderr (>&2) to prevent capture in command strings
 log() {
     local level="$1"
     local message="$2"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
     case "$level" in
-        "INFO")    echo -e "${GREEN}[INFO]${NC} $message" ;;
-        "WARN")    echo -e "${YELLOW}[WARN]${NC} $message" ;;
+        "INFO")    echo -e "${GREEN}[INFO]${NC} $message" >&2 ;;
+        "WARN")    echo -e "${YELLOW}[WARN]${NC} $message" >&2 ;;
         "ERROR")   echo -e "${RED}[ERROR]${NC} $message" >&2 ;;
-        "DEBUG")   [[ "${DEBUG:-false}" == "true" ]] && echo -e "${BLUE}[DEBUG]${NC} $message" ;;
-        "AMD")     echo -e "${CYAN}[AMD]${NC} $message" ;;
-        "SUCCESS") echo -e "${GREEN}[SUCCESS]${NC} $message" ;;
-        *)         echo "$message" ;;
+        "DEBUG")   [[ "${DEBUG:-false}" == "true" ]] && echo -e "${BLUE}[DEBUG]${NC} $message" >&2 ;;
+        "AMD")     echo -e "${CYAN}[AMD]${NC} $message" >&2 ;;
+        "SUCCESS") echo -e "${GREEN}[SUCCESS]${NC} $message" >&2 ;;
+        *)         echo "$message" >&2 ;;
     esac
 
     echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
@@ -374,27 +377,27 @@ check_dependencies() {
     local missing=()
     local available=()
 
-    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║                    Dependency Check                               ║${NC}"
-    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${CYAN}║                    Dependency Check                               ║${NC}" >&2
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}" >&2
 
     for cmd in "${REQUIRED_COMMANDS[@]}"; do
         if check_command "$cmd"; then
             available+=("$cmd")
-            echo -e "  ${GREEN}✓${NC} $cmd: ${GREEN}Installed${NC}"
+            echo -e "  ${GREEN}✓${NC} $cmd: ${GREEN}Installed${NC}" >&2
         else
             missing+=("$cmd")
-            echo -e "  ${RED}✗${NC} $cmd: ${RED}Missing${NC}"
+            echo -e "  ${RED}✗${NC} $cmd: ${RED}Missing${NC}" >&2
         fi
     done
 
-    echo
+    echo >&2
     if [[ ${#missing[@]} -eq 0 ]]; then
-        echo -e "${GREEN}All dependencies are installed!${NC}"
+        echo -e "${GREEN}All dependencies are installed!${NC}" >&2
         return 0
     else
-        echo -e "${YELLOW}Missing dependencies: ${missing[*]}${NC}"
-        echo -e "${YELLOW}Run 'sudo $SCRIPT_NAME --install-deps' to install missing dependencies${NC}"
+        echo -e "${YELLOW}Missing dependencies: ${missing[*]}${NC}" >&2
+        echo -e "${YELLOW}Run 'sudo $SCRIPT_NAME --install-deps' to install missing dependencies${NC}" >&2
         return 1
     fi
 }
@@ -498,11 +501,11 @@ install_dependencies() {
         log "ERROR" "Please run: sudo $SCRIPT_NAME --install-deps"
 
         # Show manual installation commands
-        echo -e "\n${YELLOW}Manual installation commands for your distribution:${NC}"
+        echo -e "\n${YELLOW}Manual installation commands for your distribution:${NC}" >&2
         for pkg in "${missing_packages[@]}"; do
             local install_cmd=$(get_install_command "$distro" "$pkg_manager" "$pkg")
             if [[ -n "$install_cmd" ]]; then
-                echo -e "  sudo $install_cmd"
+                echo -e "  sudo $install_cmd" >&2
             fi
         done
         return 1
@@ -543,8 +546,8 @@ install_dependencies() {
 
         *)
             log "ERROR" "Unsupported distribution for automatic installation"
-            echo -e "\n${YELLOW}Please install manually:${NC}"
-            echo "  ffmpeg, vainfo, pciutils, bc"
+            echo -e "\n${YELLOW}Please install manually:${NC}" >&2
+            echo "  ffmpeg, vainfo, pciutils, bc" >&2
             return 1
             ;;
     esac
@@ -649,9 +652,9 @@ ensure_gum() {
 interactive_menu() {
     ensure_gum
 
-    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║              Interactive Configuration Builder                     ║${NC}"
-    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${CYAN}║              Interactive Configuration Builder                     ║${NC}" >&2
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}" >&2
 
     # Check dependencies first
     if ! check_dependencies; then
@@ -695,7 +698,7 @@ interactive_menu() {
 
     # Advanced options
     if gum confirm "Configure advanced options?" --default=false; then
-        echo -e "${YELLOW}Advanced Options:${NC}"
+        echo -e "${YELLOW}Advanced Options:${NC}" >&2
 
         if gum confirm "Enable VBAQ? (better texture detail)" --default=true; then
             NO_VBAQ="false"
@@ -757,18 +760,18 @@ interactive_menu() {
     fi
 
     # Show summary
-    echo -e "\n${GREEN}Configuration Summary:${NC}"
-    echo -e "  Format: $CONTAINER"
-    echo -e "  Codec: $CODEC"
-    echo -e "  Preset: $PRESET"
-    [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE"
-    [[ -n "${QUALITY_VAL:-}" ]] && echo -e "  Quality: $QUALITY_VAL"
-    echo -e "  Audio: $AUDIO_BITRATE"
-    [[ "${NO_VBAQ:-false}" == "true" ]] && echo -e "  VBAQ: Disabled" || echo -e "  VBAQ: Enabled"
-    [[ "${NO_PREANALYSIS:-false}" == "true" ]] && echo -e "  Pre-analysis: Disabled" || echo -e "  Pre-analysis: Enabled"
-    [[ "${NO_OPENGOP:-false}" == "true" ]] && echo -e "  Open GOP: Disabled" || echo -e "  Open GOP: Enabled"
-    [[ "${TEXTURE_PRESERVE:-false}" == "true" ]] && echo -e "  Texture Preservation: Enabled"
-    [[ "${FORCE_PROCESS:-false}" == "true" ]] && echo -e "  Force Processing: Enabled"
+    echo -e "\n${GREEN}Configuration Summary:${NC}" >&2
+    echo -e "  Format: $CONTAINER" >&2
+    echo -e "  Codec: $CODEC" >&2
+    echo -e "  Preset: $PRESET" >&2
+    [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE" >&2
+    [[ -n "${QUALITY_VAL:-}" ]] && echo -e "  Quality: $QUALITY_VAL" >&2
+    echo -e "  Audio: $AUDIO_BITRATE" >&2
+    [[ "${NO_VBAQ:-false}" == "true" ]] && echo -e "  VBAQ: Disabled" >&2 || echo -e "  VBAQ: Enabled" >&2
+    [[ "${NO_PREANALYSIS:-false}" == "true" ]] && echo -e "  Pre-analysis: Disabled" >&2 || echo -e "  Pre-analysis: Enabled" >&2
+    [[ "${NO_OPENGOP:-false}" == "true" ]] && echo -e "  Open GOP: Disabled" >&2 || echo -e "  Open GOP: Enabled" >&2
+    [[ "${TEXTURE_PRESERVE:-false}" == "true" ]] && echo -e "  Texture Preservation: Enabled" >&2
+    [[ "${FORCE_PROCESS:-false}" == "true" ]] && echo -e "  Force Processing: Enabled" >&2
 
     if gum confirm "Start conversion with these settings?" --default=true; then
         # Continue to file selection
@@ -843,7 +846,7 @@ load_configuration() {
 }
 
 list_configurations() {
-    echo -e "${BLUE}Available Profiles:${NC}"
+    echo -e "${BLUE}Available Profiles:${NC}" >&2
 
     # List profiles directory
     if [[ -d "$PROFILES_DIR" ]]; then
@@ -853,7 +856,7 @@ list_configurations() {
                 local preset=$(grep "^PRESET=" "$conf" | cut -d'"' -f2)
                 local codec=$(grep "^CODEC=" "$conf" | cut -d'"' -f2)
                 local format=$(grep "^CONTAINER=" "$conf" | cut -d'"' -f2)
-                echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
+                echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})" >&2
             fi
         done
     fi
@@ -865,7 +868,7 @@ list_configurations() {
             local preset=$(grep "^PRESET=" "$conf" 2>/dev/null | cut -d'"' -f2)
             local codec=$(grep "^CODEC=" "$conf" 2>/dev/null | cut -d'"' -f2)
             local format=$(grep "^CONTAINER=" "$conf" 2>/dev/null | cut -d'"' -f2)
-            echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})"
+            echo -e "  ${GREEN}•${NC} $name (${codec}/${preset}/${format})" >&2
         fi
     done
 }
@@ -1050,63 +1053,63 @@ check_mesa_drivers() {
 }
 
 display_gpu_info() {
-    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║                    AMD GPU Information                             ║${NC}"
-    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${CYAN}║                    AMD GPU Information                             ║${NC}" >&2
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}" >&2
 
     if detect_amd_gpu; then
         local gpu_model=$(get_amd_gpu_model)
         local architecture=$(detect_gpu_architecture)
         local driver_info=$(get_amd_driver_info)
 
-        echo -e "${GREEN}GPU Model:${NC} $gpu_model"
-        echo -e "${GREEN}Architecture:${NC} $architecture"
-        echo -e "${GREEN}Driver:${NC} $driver_info"
+        echo -e "${GREEN}GPU Model:${NC} $gpu_model" >&2
+        echo -e "${GREEN}Architecture:${NC} $architecture" >&2
+        echo -e "${GREEN}Driver:${NC} $driver_info" >&2
 
         # Check Mesa drivers
         if check_mesa_drivers; then
-            echo -e "${GREEN}Mesa Drivers:${NC} ✓ Installed"
+            echo -e "${GREEN}Mesa Drivers:${NC} ✓ Installed" >&2
         else
-            echo -e "${YELLOW}Mesa Drivers:${NC} ✗ Not detected (may affect performance)"
-            echo -e "${YELLOW}  Install with: sudo apt install mesa-va-drivers (Ubuntu/Debian)${NC}"
-            echo -e "${YELLOW}  or: sudo dnf install mesa-va-drivers (Fedora)${NC}"
+            echo -e "${YELLOW}Mesa Drivers:${NC} ✗ Not detected (may affect performance)" >&2
+            echo -e "${YELLOW}  Install with: sudo apt install mesa-va-drivers (Ubuntu/Debian)${NC}" >&2
+            echo -e "${YELLOW}  or: sudo dnf install mesa-va-drivers (Fedora)${NC}" >&2
         fi
 
         # Check VA-API support
         if check_vaapi_support; then
-            echo -e "${GREEN}VA-API:${NC} ✓ Supported"
-            echo -e "${GREEN}VA-API Profiles:${NC}"
+            echo -e "${GREEN}VA-API:${NC} ✓ Supported" >&2
+            echo -e "${GREEN}VA-API Profiles:${NC}" >&2
             get_vaapi_profiles | while read line; do
-                echo "  $line"
+                echo "  $line" >&2
             done
         else
-            echo -e "${YELLOW}VA-API:${NC} ✗ Not supported"
-            echo -e "${YELLOW}  Install VA-API drivers for your distribution${NC}"
+            echo -e "${YELLOW}VA-API:${NC} ✗ Not supported" >&2
+            echo -e "${YELLOW}  Install VA-API drivers for your distribution${NC}" >&2
         fi
 
         # Check AMF support
         if check_amf_support; then
-            echo -e "${GREEN}AMF:${NC} ✓ Supported"
+            echo -e "${GREEN}AMF:${NC} ✓ Supported" >&2
         else
-            echo -e "${YELLOW}AMF:${NC} ✗ Not available (using VA-API)"
+            echo -e "${YELLOW}AMF:${NC} ✗ Not available (using VA-API)" >&2
         fi
 
         # Check AV1 support
         if check_av1_support; then
-            echo -e "${GREEN}AV1 Encoding:${NC} ✓ Supported (RDNA 3)"
+            echo -e "${GREEN}AV1 Encoding:${NC} ✓ Supported (RDNA 3)" >&2
         else
-            echo -e "${YELLOW}AV1 Encoding:${NC} ✗ Not supported (RDNA 3 required)"
+            echo -e "${YELLOW}AV1 Encoding:${NC} ✗ Not supported (RDNA 3 required)" >&2
         fi
 
         # Show safe B-frame settings
         local bframes=$(get_safe_bframe_settings "$architecture" "h264")
-        echo -e "${GREEN}Safe B-frame settings:${NC} $bframes"
+        echo -e "${GREEN}Safe B-frame settings:${NC} $bframes" >&2
 
     else
-        echo -e "${RED}No AMD GPU detected${NC}"
+        echo -e "${RED}No AMD GPU detected${NC}" >&2
     fi
 
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${NC}" >&2
 }
 
 detect_hardware_capabilities() {
@@ -1306,17 +1309,17 @@ calculate_bitrate_for_target_size() {
         local size_unit="${target_size//[0-9.]/}"
 
         case "${size_unit^^}" in
-            "K"|"KB") target_bits=$(echo "$size_num * 1024 * 8" | bc) ;;
-            "M"|"MB") target_bits=$(echo "$size_num * 1024 * 1024 * 8" | bc) ;;
-            "G"|"GB") target_bits=$(echo "$size_num * 1024 * 1024 * 1024 * 8" | bc) ;;
-            *) target_bits=$(echo "$size_num * 1024 * 1024 * 8" | bc) ;; # Default to MB
+            "K"|"KB") target_bits=$(echo "$size_num * 1024 * 8" | bc 2>/dev/null) ;;
+            "M"|"MB") target_bits=$(echo "$size_num * 1024 * 1024 * 8" | bc 2>/dev/null) ;;
+            "G"|"GB") target_bits=$(echo "$size_num * 1024 * 1024 * 1024 * 8" | bc 2>/dev/null) ;;
+            *) target_bits=$(echo "$size_num * 1024 * 1024 * 8" | bc 2>/dev/null) ;; # Default to MB
         esac
 
         # Calculate bitrate (bits per second)
-        local bitrate=$(echo "$target_bits / $duration" | bc)
+        local bitrate=$(echo "$target_bits / $duration" | bc 2>/dev/null)
 
         # Convert to kbps and round
-        echo $(echo "$bitrate / 1024" | bc)
+        echo $(echo "$bitrate / 1024" | bc 2>/dev/null)
     else
         echo ""
     fi
@@ -1340,6 +1343,8 @@ is_vob_file() {
     [[ "$extension" == "vob" ]]
 }
 
+# IMPORTANT: This function should ONLY output the final ffmpeg command
+# All debug/log output must go through the log() function which writes to stderr
 build_ffmpeg_command() {
     local input_file="$1"
     local output_file="$2"
@@ -1668,7 +1673,8 @@ process_file() {
 
     # Dry run mode
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        echo -e "${YELLOW}[DRY RUN]${NC} $cmd"
+        echo -e "${YELLOW}[DRY RUN]${NC} $cmd" >&2
+        echo "$cmd"  # This goes to stdout for capture/display
         return
     fi
 
@@ -1725,7 +1731,7 @@ process_files() {
     local start_time=$(date +%s)
 
     for file in "${files[@]}"; do
-        echo "-----------------------------------"
+        echo "-----------------------------------" >&2
         if process_file "$file"; then
             ((success_count++))
         else
@@ -1739,13 +1745,13 @@ process_files() {
     local seconds=$((total_time % 60))
 
     # Summary
-    echo "==================================="
+    echo "===================================" >&2
     log "INFO" "=== Conversion Complete ==="
     log "SUCCESS" "Successful: $success_count"
     [[ $fail_count -gt 0 ]] && log "ERROR" "Failed: $fail_count"
     log "INFO" "Total time: ${minutes}m ${seconds}s"
     log "INFO" "Log file: $LOG_FILE"
-    echo "==================================="
+    echo "===================================" >&2
 }
 
 # ============================================
@@ -1940,7 +1946,7 @@ main() {
     # Validate output format
     if ! is_valid_output_format "$CONTAINER"; then
         log "ERROR" "Invalid output format: $CONTAINER"
-        echo "Supported formats: ${!OUTPUT_FORMATS[*]}"
+        echo "Supported formats: ${!OUTPUT_FORMATS[*]}" >&2
         exit 1
     fi
 
@@ -1968,7 +1974,7 @@ main() {
     # Validate preset
     if [[ -z "${QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${AV1_QUALITY_PRESETS[$PRESET]:-}" ]]; then
         log "ERROR" "Invalid preset: $PRESET"
-        echo "Valid presets: ${!QUALITY_PRESETS[*]}"
+        echo "Valid presets: ${!QUALITY_PRESETS[*]}" >&2
         exit 1
     fi
 
