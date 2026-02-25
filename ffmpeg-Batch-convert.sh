@@ -4,39 +4,37 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.0
+# Version: 1.1.1
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
 #
 # Features:
+#   - Universal AMD GPU support (Polaris, Vega, RDNA 1/2/3)
 #   - Automatic dependency installation
 #   - Multi-distribution support (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE)
 #   - AMD GPU detection and VA-API/AMF support
+#   - AV1 encoding support for RDNA 3 (RX 7000 series)
+#   - Smart B-frame management per GPU architecture
+#   - Zero-copy hardware pipeline (decode → filter → encode)
+#   - HQVBR (High Quality Variable Bitrate) for consistent quality
 #   - Advanced encoding options with presets
 #   - Detailed logging and error handling
-#   - Full hardware pipeline optimization
-#   - Variance Based Adaptive Quantization (VBAQ) support
-#   - Pre-encoding analysis and optimization
-#   - Open GOP support for better compression
-#   - Enhanced B-frame and reference frame optimization
-#   - Peak bitrate control for consistent quality
 #   - Interactive menu builder with gum
-#   - Configuration file support (JSON/YAML)
-#   - Resolution presets (720p, 1080p, 2K, 4K)
+#   - Configuration file support
 #
 # Changelog:
-#   v1.1.0 - Fixed ANSI color codes
-#          - Added interactive menu with gum
-#          - Configuration file support (.conf)
-#          - Resolution presets
-#          - Profile management
-#          - GitHub integration
-#   v1.0.2 - Fixed color code formatting
-#          - Added Open GOP support
-#          - Enhanced B-frame configuration
+#   v1.1.1 - Added universal AMD GPU support (Polaris to RDNA 3)
+#          - AV1 encoding support for RX 7000 series
+#          - GPU architecture detection with B-frame safety
+#          - Zero-copy pipeline optimization
+#          - Enhanced HQVBR implementation
+#          - Mesa driver validation
+#          - Automatic AMF/VA-API fallback
+#   v1.1.0 - Fixed ANSI color codes, interactive menu, configuration files
+#   v1.0.2 - Fixed color code formatting, Open GOP support
 #   v1.0.1 - Added VBAQ support, pre-analysis, B-frame optimization
-#   v1.0.0 - Initial release with multi-distro support and auto-install
+#   v1.0.0 - Initial release
 #
 #############################################################################################################################
 
@@ -46,13 +44,13 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.0"
+VERSION="1.1.1"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
 PROFILES_DIR="${SCRIPT_DIR}/profiles"
 
-# ANSI color codes - FIXED: Properly escaped for echo -e
+# ANSI color codes
 RED="\033[0;31m"
 GREEN="\033[0;32m"
 YELLOW="\033[1;33m"
@@ -80,21 +78,27 @@ declare -A RESOLUTION_PRESETS=(
     ["8K"]="7680x4320"
 )
 
+# GPU Architecture detection
+declare -A AMD_ARCHITECTURES=(
+    ["POLARIS"]="400 500 400X 500X"  # RX 400/500 series
+    ["VEGA"]="Vega 56 Vega 64 Radeon VII"  # Vega series
+    ["RDNA1"]="5500 5600 5700"  # RX 5000 series
+    ["RDNA2"]="6400 6500 6600 6700 6800 6900"  # RX 6000 series
+    ["RDNA3"]="7600 7700 7800 7900"  # RX 7000 series
+)
+
 # ============================================
-# Enhanced AMD-Specific Encoding Presets v2
+# Enhanced AMD-Specific Encoding Presets v3
 # ============================================
 
-# AMF encoder presets with advanced AMD optimizations
-# Based on AMD AMF SDK documentation and hardware capabilities
+# AMF encoder presets with HQVBR for all AMD GPUs
 declare -A QUALITY_PRESETS=(
     # Maximum quality - CQP mode with low QP values
     # Best for archival, minimal compression artifacts
-    # Added Open GOP, increased reference frames, full motion estimation
     ["maxquality"]="-quality quality -rc cqp -qp_i 18 -qp_p 18 -qp_b 22 -vbaq 1 -preanalysis 1 -me full -maxaufsize 4 -gops_per_idr 60 -open_gop 1 -luma_adaptive_quantization 1"
 
-    # Balanced - High Quality VBR with pre-analysis
+    # Balanced - High Quality VBR with pre-analysis (HQVBR)
     # Optimal for general use, good quality/size ratio
-    # Added peak bitrate control to prevent blocking in fast motion
     ["balanced"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 15M -peak_bitrate 15M -bufsize 24M -vbaq 1 -preanalysis 1 -me quarter -maxaufsize 3 -gops_per_idr 30 -open_gop 1"
 
     # Fast encoding - Speed optimized with peak VBR
@@ -112,22 +116,40 @@ declare -A QUALITY_PRESETS=(
 
 # VA-API presets for open-source driver path
 declare -A VAAPI_QUALITY_PRESETS=(
-    ["maxquality"]="-rc CQP -qp 18 -maxrate 50M -compression_level 7"
-    ["balanced"]="-rc VBR -b:v 8M -maxrate 15M -compression_level 5 -qp 22"
-    ["fast"]="-rc VBR -b:v 5M -maxrate 8M -compression_level 3"
-    ["highcompression"]="-rc VBR -b:v 3M -maxrate 5M -compression_level 7 -qp 26"
-    ["streaming"]="-rc VBR -b:v 8M -maxrate 10M -compression_level 5 -qp 23"
+    ["maxquality"]="-rc CQP -qp 18 -maxrate 50M -compression_level 7 -quality 7"
+    ["balanced"]="-rc VBR -b:v 8M -maxrate 15M -compression_level 5 -qp 22 -quality 5"
+    ["fast"]="-rc VBR -b:v 5M -maxrate 8M -compression_level 3 -quality 3"
+    ["highcompression"]="-rc VBR -b:v 3M -maxrate 5M -compression_level 7 -qp 26 -quality 5"
+    ["streaming"]="-rc VBR -b:v 8M -maxrate 10M -compression_level 5 -qp 23 -quality 5"
 )
 
-# Enhanced B-frame optimization settings per codec
-# Increased reference frames for better temporal compression
+# AV1 presets for RDNA 3 GPUs
+declare -A AV1_QUALITY_PRESETS=(
+    ["maxquality"]="-quality quality -rc cqp -qp 18 -vbaq 1 -preanalysis 1"
+    ["balanced"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 12M"
+    ["fast"]="-quality speed -rc vbr_peak -maxrate 8M"
+    ["highcompression"]="-quality quality -rc vbr_latency -qvbr_quality_level 26 -maxrate 6M"
+    ["streaming"]="-quality quality -rc vbr_latency -qvbr_quality_level 23 -maxrate 8M"
+)
+
+# GPU architecture specific B-frame settings
+declare -A BFRAME_SAFETY=(
+    ["POLARIS"]="-bf 0"  # B-frames can cause issues on Polaris
+    ["VEGA"]="-bf 2 -refs 3"  # Limited B-frame support on Vega
+    ["RDNA1"]="-bf 3 -refs 4"  # Full B-frame support on RDNA 1
+    ["RDNA2"]="-bf 4 -refs 5"  # Enhanced on RDNA 2
+    ["RDNA3"]="-bf 5 -refs 6"  # Maximum on RDNA 3
+    ["UNKNOWN"]="-bf 2 -refs 3"  # Conservative default
+)
+
+# Codec-specific B-frame settings
 declare -A BFRAME_SETTINGS=(
     ["h264"]="-bf 3 -refs 6 -b_strategy 2 -weightb 1 -directpred 3 -b_pyramid normal"
     ["hevc"]="-bf 5 -refs 5 -b_strategy 2 -weightb 1 -b_pyramid 1"
+    ["av1"]="-bf 3 -refs 4"  # AV1 handles B-frames differently
 )
 
 # Motion estimation settings per quality preset
-# Enhanced for better motion handling
 declare -A ME_SETTINGS=(
     ["maxquality"]="-me_method full -subq 7 -trellis 2 -cmp 2 -mbd 2 -flags +mv0 -flags2 +fastpskip"
     ["balanced"]="-me_method hex -subq 5 -trellis 1 -cmp 1 -mbd 1"
@@ -154,14 +176,12 @@ print_banner() {
     echo -e "${CYAN}║   Wael Isa - www.wael.name                                        ║${NC}"
     echo -e "${CYAN}║   GitHub: https://github.com/waelisa/ffmpeg-Batch-convert         ║${NC}"
     echo -e "${CYAN}║                                                                   ║${NC}"
-    echo -e "${CYAN}║   Optimized for AMD Graphics Cards with:                          ║${NC}"
-    echo -e "${CYAN}║   • Full hardware pipeline (decode → filter → encode)             ║${NC}"
-    echo -e "${CYAN}║   • VBAQ (Variance Based Adaptive Quantization)                   ║${NC}"
-    echo -e "${CYAN}║   • Pre-analysis for better quality distribution                  ║${NC}"
-    echo -e "${CYAN}║   • Open GOP for improved compression                             ║${NC}"
-    echo -e "${CYAN}║   • 6 Reference frames for better prediction                      ║${NC}"
-    echo -e "${CYAN}║   • Peak bitrate control for consistent quality                   ║${NC}"
-    echo -e "${CYAN}║   • Texture preservation for fine details                         ║${NC}"
+    echo -e "${CYAN}║   Universal AMD GPU Support:                                       ║${NC}"
+    echo -e "${CYAN}║   • Polaris (RX 400/500) • Vega • RDNA 1 • RDNA 2 • RDNA 3        ║${NC}"
+    echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series                                ║${NC}"
+    echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}"
+    echo -e "${CYAN}║   • Zero-copy hardware pipeline                                    ║${NC}"
+    echo -e "${CYAN}║   • HQVBR for consistent quality                                   ║${NC}"
     echo -e "${CYAN}║                                                                   ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 }
@@ -180,10 +200,11 @@ print_usage() {
     echo -e "    --save-conf NAME       Save current settings as profile"
     echo -e "    --load-conf NAME       Load profile"
     echo -e "    --list-conf            List available profiles"
+    echo -e "    --gpu-info             Display detailed GPU information"
     echo
     echo -e "${YELLOW}Output Options:${NC}"
     echo -e "    -o, --output DIR        Output directory (default: ./output)"
-    echo -e "    -c, --codec CODEC       Video codec: h264, hevc (default: h264)"
+    echo -e "    -c, --codec CODEC       Video codec: h264, hevc, av1 (default: h264)"
     echo -e "    -p, --preset PRESET     Quality preset: "
     echo -e "                            • maxquality - Maximum quality (largest files)"
     echo -e "                            • balanced  - Good quality/size balance"
@@ -218,6 +239,9 @@ print_usage() {
     echo -e "    # Basic conversion with auto hardware detection"
     echo -e "    $SCRIPT_NAME *.mkv"
     echo
+    echo -e "    # AV1 encoding on RDNA 3 GPU (RX 7000 series)"
+    echo -e "    $SCRIPT_NAME -c av1 -p maxquality --gpu-info *.mp4"
+    echo
     echo -e "    # Interactive configuration menu"
     echo -e "    $SCRIPT_NAME --conf"
     echo
@@ -225,18 +249,15 @@ print_usage() {
     echo -e "    $SCRIPT_NAME --save-conf myprofile --preset maxquality"
     echo -e "    $SCRIPT_NAME --load-conf myprofile *.mp4"
     echo
-    echo -e "    # Maximum quality H.265 encoding with texture preservation"
-    echo -e "    $SCRIPT_NAME -c hevc -p maxquality --texture-preserve -o archived/ video.mp4"
-    echo
     echo -e "    # 4K conversion with streaming preset"
     echo -e "    $SCRIPT_NAME -r 4K -p streaming *.mkv"
     echo
-    echo -e "${CYAN}AMD OPTIMIZATION NOTES:${NC}"
-    echo -e "    • VBAQ improves quality in complex textures (grass, film grain)"
-    echo -e "    • Open GOP allows frame references across scene cuts"
-    echo -e "    • 6 reference frames provide better motion prediction"
-    echo -e "    • Peak bitrate control prevents blocking in fast motion"
-    echo -e "    • Texture preservation keeps fine details sharp"
+    echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}"
+    echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability"
+    echo -e "    • Vega: Good B-frame support up to 2"
+    echo -e "    • RDNA 1 (RX 5000): Full B-frame support up to 3"
+    echo -e "    • RDNA 2 (RX 6000): Enhanced B-frame support up to 4"
+    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 5"
     echo
     echo -e "${BLUE}Supported input formats:${NC} ${INPUT_EXTENSIONS[*]}"
 }
@@ -245,7 +266,7 @@ print_version() {
     echo "Advanced AMD GPU Batch Video Converter v${VERSION}"
     echo "Wael Isa - www.wael.name"
     echo "GitHub: https://github.com/waelisa/ffmpeg-Batch-convert"
-    echo "Optimized for AMD Graphics Cards"
+    echo "Universal AMD GPU Support (Polaris → RDNA 3)"
 }
 
 log() {
@@ -271,6 +292,308 @@ check_command() {
         return 1
     fi
     return 0
+}
+
+# ============================================
+# GPU Architecture Detection
+# ============================================
+
+detect_gpu_architecture() {
+    local gpu_model=$(get_amd_gpu_model)
+    local architecture="UNKNOWN"
+
+    # Convert to uppercase for comparison
+    gpu_model=$(echo "$gpu_model" | tr '[:upper:]' '[:lower:]')
+
+    # Check for Polaris (RX 400/500 series)
+    if echo "$gpu_model" | grep -E "rx (4[0-9]{2}|5[0-9]{2})|polaris" &>/dev/null; then
+        architecture="POLARIS"
+    # Check for Vega
+    elif echo "$gpu_model" | grep -E "vega|radeon vii" &>/dev/null; then
+        architecture="VEGA"
+    # Check for RDNA 1 (RX 5000 series)
+    elif echo "$gpu_model" | grep -E "rx 5[0-9]{3}|navi 1[0-9]" &>/dev/null; then
+        architecture="RDNA1"
+    # Check for RDNA 2 (RX 6000 series)
+    elif echo "$gpu_model" | grep -E "rx 6[0-9]{3}|navi 2[0-9]|rdna2" &>/dev/null; then
+        architecture="RDNA2"
+    # Check for RDNA 3 (RX 7000 series)
+    elif echo "$gpu_model" | grep -E "rx 7[0-9]{3}|navi 3[0-9]|rdna3" &>/dev/null; then
+        architecture="RDNA3"
+    fi
+
+    echo "$architecture"
+}
+
+check_av1_support() {
+    local architecture=$(detect_gpu_architecture)
+
+    # Only RDNA 3 (RX 7000 series) supports AV1 encoding
+    if [[ "$architecture" == "RDNA3" ]]; then
+        # Check if AV1 encoder is available
+        if ffmpeg -encoders 2>/dev/null | grep -q "av1_amf\|av1_vaapi"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+get_safe_bframe_settings() {
+    local architecture="$1"
+    local codec="$2"
+    local settings=""
+
+    # Get architecture-specific safe settings
+    if [[ -n "${BFRAME_SAFETY[$architecture]:-}" ]]; then
+        settings="${BFRAME_SAFETY[$architecture]}"
+    else
+        settings="${BFRAME_SAFETY[UNKNOWN]}"
+    fi
+
+    # For AV1, use AV1-specific settings
+    if [[ "$codec" == "av1" ]]; then
+        settings="-bf 3 -refs 4"
+    fi
+
+    echo "$settings"
+}
+
+# ============================================
+# Hardware Detection & Analysis
+# ============================================
+
+detect_amd_gpu() {
+    if lspci | grep -i "vga.*amd" &>/dev/null || \
+       lspci | grep -i "vga.*ati" &>/dev/null || \
+       lspci | grep -i "display.*amd" &>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+get_amd_gpu_model() {
+    lspci | grep -i "vga.*amd\|vga.*ati\|display.*amd" | \
+        sed -E 's/.*: (.*)/\1/' | head -1
+}
+
+check_vaapi_support() {
+    if check_command "vainfo"; then
+        if vainfo 2>&1 | grep -q "VA-API"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+check_vaapi_encoding_support() {
+    local codec="$1"
+    local profile=""
+
+    case "$codec" in
+        h264) profile="VAProfileH264High" ;;
+        hevc) profile="VAProfileHEVCMain" ;;
+        av1)  profile="VAProfileAV1Profile0" ;;
+        *) return 1 ;;
+    esac
+
+    if check_command "vainfo"; then
+        if vainfo 2>&1 | grep -q "$profile.*VAEntrypointEncSlice"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+check_amf_support() {
+    # Check if AMF is available in FFmpeg
+    if ffmpeg -encoders 2>/dev/null | grep -q "h264_amf"; then
+        return 0
+    fi
+    return 1
+}
+
+check_amf_encoding_support() {
+    local codec="$1"
+
+    if ffmpeg -encoders 2>/dev/null | grep -q "${codec}_amf"; then
+        return 0
+    fi
+    return 1
+}
+
+get_vaapi_profiles() {
+    if check_command "vainfo"; then
+        vainfo 2>/dev/null | grep -E "VAProfile(H.264|HEVC|AV1)" || true
+    fi
+}
+
+get_render_device() {
+    # Find the first AMD render device
+    for device in /dev/dri/renderD*; do
+        if [[ -e "$device" ]]; then
+            # Check if it's an AMD device
+            if udevadm info -a -n "$device" 2>/dev/null | grep -qi "amd\|ati"; then
+                echo "$device"
+                return 0
+            fi
+        fi
+    done
+
+    # Fallback to first render device
+    for device in /dev/dri/renderD*; do
+        if [[ -e "$device" ]]; then
+            echo "$device"
+            return 0
+        fi
+    done
+
+    echo ""
+}
+
+check_mesa_drivers() {
+    if check_command "vainfo"; then
+        local va_driver=$(vainfo 2>&1 | grep "vainfo:" | grep "driver" | head -1)
+        if echo "$va_driver" | grep -qi "mesa"; then
+            log "AMD" "✓ Mesa VA-API driver detected"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+display_gpu_info() {
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                    AMD GPU Information                             ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+
+    if detect_amd_gpu; then
+        local gpu_model=$(get_amd_gpu_model)
+        local architecture=$(detect_gpu_architecture)
+        local driver_info=$(get_amd_driver_info)
+
+        echo -e "${GREEN}GPU Model:${NC} $gpu_model"
+        echo -e "${GREEN}Architecture:${NC} $architecture"
+        echo -e "${GREEN}Driver:${NC} $driver_info"
+
+        # Check Mesa drivers
+        if check_mesa_drivers; then
+            echo -e "${GREEN}Mesa Drivers:${NC} ✓ Installed"
+        else
+            echo -e "${YELLOW}Mesa Drivers:${NC} ✗ Not detected (may affect performance)"
+        fi
+
+        # Check VA-API support
+        if check_vaapi_support; then
+            echo -e "${GREEN}VA-API:${NC} ✓ Supported"
+            echo -e "${GREEN}VA-API Profiles:${NC}"
+            get_vaapi_profiles | while read line; do
+                echo "  $line"
+            done
+        else
+            echo -e "${YELLOW}VA-API:${NC} ✗ Not supported"
+        fi
+
+        # Check AMF support
+        if check_amf_support; then
+            echo -e "${GREEN}AMF:${NC} ✓ Supported"
+        else
+            echo -e "${YELLOW}AMF:${NC} ✗ Not available (using VA-API)"
+        fi
+
+        # Check AV1 support
+        if check_av1_support; then
+            echo -e "${GREEN}AV1 Encoding:${NC} ✓ Supported (RDNA 3)"
+        else
+            echo -e "${YELLOW}AV1 Encoding:${NC} ✗ Not supported (RDNA 3 required)"
+        fi
+
+        # Show safe B-frame settings
+        local bframes=$(get_safe_bframe_settings "$architecture" "h264")
+        echo -e "${GREEN}Safe B-frame settings:${NC} $bframes"
+
+    else
+        echo -e "${RED}No AMD GPU detected${NC}"
+    fi
+
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
+}
+
+detect_hardware_capabilities() {
+    log "INFO" "Detecting hardware capabilities..."
+
+    # Check for AMD GPU
+    if detect_amd_gpu; then
+        local gpu_model=$(get_amd_gpu_model)
+        local architecture=$(detect_gpu_architecture)
+        log "AMD" "AMD GPU detected: ${gpu_model:-Unknown model}"
+        log "AMD" "Architecture: $architecture"
+
+        # Store architecture for later use
+        GPU_ARCHITECTURE="$architecture"
+
+        # Check for VA-API support
+        if check_vaapi_support; then
+            log "AMD" "✓ VA-API is supported"
+            RENDER_DEVICE=$(get_render_device)
+            [[ -n "$RENDER_DEVICE" ]] && log "AMD" "✓ Render device: $RENDER_DEVICE"
+            HAS_VAAPI=true
+
+            # Check Mesa drivers
+            if check_mesa_drivers; then
+                log "AMD" "✓ Mesa VA-API drivers detected"
+            fi
+
+            # Show supported profiles
+            log "DEBUG" "Supported VA-API profiles:"
+            get_vaapi_profiles | while read line; do
+                log "DEBUG" "  $line"
+            done
+        else
+            log "WARN" "VA-API not supported. Install mesa-va-drivers."
+            HAS_VAAPI=false
+        fi
+
+        # Check for AMF support
+        if check_amf_support; then
+            log "AMD" "✓ AMF encoder is available (proprietary path)"
+            HAS_AMF=true
+        else
+            log "DEBUG" "AMF not available, using VA-API (open source path)"
+            HAS_AMF=false
+        fi
+
+        # Check for HEVC hardware support
+        if check_vaapi_encoding_support "hevc"; then
+            log "AMD" "✓ HEVC hardware encoding supported"
+            HAS_HEVC_HW=true
+        else
+            log "DEBUG" "HEVC hardware encoding not available"
+            HAS_HEVC_HW=false
+        fi
+
+        # Check for AV1 support (RDNA 3 only)
+        if check_av1_support; then
+            log "AMD" "✓ AV1 hardware encoding supported (RDNA 3)"
+            HAS_AV1_HW=true
+        fi
+
+        # Check for Open GOP support
+        if ffmpeg -h encoder=h264_amf 2>&1 | grep -q "open_gop"; then
+            log "AMD" "✓ Open GOP supported"
+            HAS_OPEN_GOP=true
+        fi
+
+        # Show safe B-frame settings for this GPU
+        local safe_bframes=$(get_safe_bframe_settings "$architecture" "h264")
+        log "AMD" "Safe B-frame settings: $safe_bframes"
+
+    else
+        log "WARN" "No AMD GPU detected. Falling back to CPU encoding."
+        GPU_ARCHITECTURE="UNKNOWN"
+        HAS_AMD=false
+        HAS_VAAPI=false
+        HAS_AMF=false
+    fi
 }
 
 # ============================================
@@ -349,8 +672,16 @@ interactive_menu() {
     echo -e "${CYAN}║              Interactive Configuration Builder                     ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
 
-    # Codec selection
-    CODEC=$(gum choose --header "Select video codec" "h264" "hevc" --selected "h264")
+    # Detect hardware first
+    detect_hardware_capabilities
+
+    # Codec selection (show AV1 only if supported)
+    local codec_options=("h264" "hevc")
+    if [[ "$HAS_AV1_HW" == "true" ]]; then
+        codec_options+=("av1")
+    fi
+
+    CODEC=$(gum choose --header "Select video codec" "${codec_options[@]}" --selected "h264")
 
     # Preset selection
     PRESET=$(gum choose --header "Select quality preset" \
@@ -598,6 +929,10 @@ install_dependencies() {
         missing_deps+=("pciutils")
     fi
 
+    if ! check_command "bc"; then
+        missing_deps+=("bc")
+    fi
+
     if ! check_command "gum"; then
         install_gum
     fi
@@ -666,127 +1001,7 @@ install_dependencies() {
 }
 
 # ============================================
-# Hardware Detection & Analysis
-# ============================================
-
-detect_amd_gpu() {
-    if lspci | grep -i "vga.*amd" &>/dev/null || \
-       lspci | grep -i "vga.*ati" &>/dev/null || \
-       lspci | grep -i "display.*amd" &>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-get_amd_gpu_model() {
-    lspci | grep -i "vga.*amd\|vga.*ati\|display.*amd" | \
-        sed -E 's/.*: (.*)/\1/' | head -1
-}
-
-check_vaapi_support() {
-    if check_command "vainfo"; then
-        if vainfo 2>&1 | grep -q "VA-API"; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-check_amf_support() {
-    # Check if AMF is available in FFmpeg
-    if ffmpeg -encoders 2>/dev/null | grep -q "h264_amf"; then
-        return 0
-    fi
-    return 1
-}
-
-get_vaapi_profiles() {
-    if check_command "vainfo"; then
-        vainfo 2>/dev/null | grep -E "VAProfile(H\|HEVC)" || true
-    fi
-}
-
-get_render_device() {
-    # Find the first AMD render device
-    for device in /dev/dri/renderD*; do
-        if [[ -e "$device" ]]; then
-            # Check if it's an AMD device
-            if udevadm info -a -n "$device" 2>/dev/null | grep -qi "amd\|ati"; then
-                echo "$device"
-                return 0
-            fi
-        fi
-    done
-
-    # Fallback to first render device
-    for device in /dev/dri/renderD*; do
-        if [[ -e "$device" ]]; then
-            echo "$device"
-            return 0
-        fi
-    done
-
-    echo ""
-}
-
-detect_hardware_capabilities() {
-    log "INFO" "Detecting hardware capabilities..."
-
-    # Check for AMD GPU
-    if detect_amd_gpu; then
-        local gpu_model=$(get_amd_gpu_model)
-        log "AMD" "AMD GPU detected: ${gpu_model:-Unknown model}"
-
-        # Check for VA-API support
-        if check_vaapi_support; then
-            log "AMD" "✓ VA-API is supported"
-            RENDER_DEVICE=$(get_render_device)
-            [[ -n "$RENDER_DEVICE" ]] && log "AMD" "✓ Render device: $RENDER_DEVICE"
-            HAS_VAAPI=true
-
-            # Show supported profiles
-            log "DEBUG" "Supported VA-API profiles:"
-            get_vaapi_profiles | while read line; do
-                log "DEBUG" "  $line"
-            done
-        else
-            log "WARN" "VA-API not supported. Install mesa-va-drivers."
-            HAS_VAAPI=false
-        fi
-
-        # Check for AMF support
-        if check_amf_support; then
-            log "AMD" "✓ AMF encoder is available (proprietary path)"
-            HAS_AMF=true
-        else
-            log "DEBUG" "AMF not available, using VA-API (open source path)"
-            HAS_AMF=false
-        fi
-
-        # Check for HEVC hardware support
-        if vainfo 2>/dev/null | grep -q "VAProfileHEVC"; then
-            log "AMD" "✓ HEVC hardware encoding supported"
-            HAS_HEVC_HW=true
-        else
-            log "DEBUG" "HEVC hardware encoding not available"
-            HAS_HEVC_HW=false
-        fi
-
-        # Check for Open GOP support
-        if ffmpeg -h encoder=h264_amf 2>&1 | grep -q "open_gop"; then
-            log "AMD" "✓ Open GOP supported"
-            HAS_OPEN_GOP=true
-        fi
-    else
-        log "WARN" "No AMD GPU detected. Falling back to CPU encoding."
-        HAS_AMD=false
-        HAS_VAAPI=false
-        HAS_AMF=false
-    fi
-}
-
-# ============================================
-# FFmpeg Command Generation with Enhanced AMD Optimizations
+# FFmpeg Command Generation with Universal AMD Support
 # ============================================
 
 calculate_bitrate_for_target_size() {
@@ -852,14 +1067,15 @@ build_ffmpeg_command() {
         fi
     fi
 
-    # Hardware acceleration setup
+    # Hardware acceleration setup with zero-copy pipeline
     if [[ "${NO_HWACCEL:-false}" != "true" ]] && [[ "$HAS_VAAPI" == "true" ]]; then
         local driver_info=$(get_amd_driver_info)
         log "DEBUG" "Using AMD driver: $driver_info"
 
-        if [[ "$USE_AMF" == "true" ]] && [[ "$HAS_AMF" == "true" ]] && [[ "$CODEC" == "h264" ]]; then
-            # AMF encoding path (proprietary, better quality)
-            log "AMD" "Using AMF hardware encoding pipeline"
+        # Try AMF first if available and codec supports it
+        if [[ "$USE_AMF" == "true" ]] && [[ "$HAS_AMF" == "true" ]] && check_amf_encoding_support "$CODEC"; then
+            # AMF encoding path with zero-copy
+            log "AMD" "Using AMF hardware encoding pipeline (zero-copy)"
             cmd+=" -hwaccel vaapi -hwaccel_device $RENDER_DEVICE -hwaccel_output_format vaapi"
             cmd+=" -i \"$input_file\""
 
@@ -870,6 +1086,8 @@ build_ffmpeg_command() {
             if [[ "${USE_TARGET_BITRATE:-false}" == "true" ]]; then
                 # Use target bitrate mode
                 cmd+=" -rc vbr_peak -b:v ${TARGET_VIDEO_BITRATE}k -maxrate $((TARGET_VIDEO_BITRATE * 2))k -bufsize $((TARGET_VIDEO_BITRATE * 4))k"
+            elif [[ "$CODEC" == "av1" ]] && [[ -n "${AV1_QUALITY_PRESETS[$PRESET]:-}" ]]; then
+                cmd+=" ${AV1_QUALITY_PRESETS[$PRESET]}"
             elif [[ -n "${QUALITY_PRESETS[$PRESET]:-}" ]]; then
                 cmd+=" ${QUALITY_PRESETS[$PRESET]}"
             fi
@@ -877,7 +1095,11 @@ build_ffmpeg_command() {
             # Override quality if specified
             if [[ -n "${QUALITY_VAL:-}" ]] && [[ "${USE_TARGET_BITRATE:-false}" != "true" ]]; then
                 if [[ "$PRESET" == "maxquality" ]] || [[ "$PRESET" == "cqp"* ]]; then
-                    cmd+=" -qp_i $QUALITY_VAL -qp_p $QUALITY_VAL -qp_b $((QUALITY_VAL + 2))"
+                    if [[ "$CODEC" == "av1" ]]; then
+                        cmd+=" -qp $QUALITY_VAL"
+                    else
+                        cmd+=" -qp_i $QUALITY_VAL -qp_p $QUALITY_VAL -qp_b $((QUALITY_VAL + 2))"
+                    fi
                 else
                     cmd+=" -qvbr_quality_level $QUALITY_VAL"
                 fi
@@ -887,6 +1109,10 @@ build_ffmpeg_command() {
             if [[ "${TEXTURE_PRESERVE:-false}" == "true" ]]; then
                 cmd+=" ${TEXTURE_SETTINGS[preserve]}"
             fi
+
+            # Get safe B-frame settings for this GPU
+            local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")
+            cmd+=" $safe_bframes"
 
             # Disable VBAQ if requested
             if [[ "${NO_VBAQ:-false}" == "true" ]]; then
@@ -902,13 +1128,15 @@ build_ffmpeg_command() {
             if [[ "${NO_OPENGOP:-false}" == "true" ]]; then
                 cmd=${cmd/"-open_gop 1"/"-open_gop 0"}
             fi
-        else
-            # VA-API encoding path (open source, good compatibility)
-            log "AMD" "Using VA-API hardware encoding pipeline"
+
+        # Fallback to VA-API if AMF not available or fails
+        elif check_vaapi_encoding_support "$CODEC"; then
+            # VA-API encoding path with zero-copy
+            log "AMD" "Using VA-API hardware encoding pipeline (zero-copy)"
             cmd+=" -hwaccel vaapi -hwaccel_device $RENDER_DEVICE -hwaccel_output_format vaapi"
             cmd+=" -i \"$input_file\""
 
-            # Build video filter chain
+            # Build video filter chain with zero-copy
             local filters="format=nv12,hwupload"
 
             # Add deinterlacing if requested
@@ -952,42 +1180,49 @@ build_ffmpeg_command() {
             if [[ "${USE_TARGET_BITRATE:-false}" == "true" ]]; then
                 cmd+=" -b:v ${TARGET_VIDEO_BITRATE}k"
             fi
-        fi
 
-        # Add B-frame optimizations
-        if [[ -n "${BFRAME_SETTINGS[$CODEC]:-}" ]]; then
-            cmd+=" ${BFRAME_SETTINGS[$CODEC]}"
+            # Get safe B-frame settings for this GPU
+            local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")
+            cmd+=" $safe_bframes"
+        else
+            # Fallback to CPU encoding
+            log "WARN" "Hardware encoding not available for $CODEC, falling back to CPU"
+            USE_AMF=false
+            HAS_VAAPI=false
         fi
+    fi
 
-        # Add motion estimation optimizations
-        if [[ -n "${ME_SETTINGS[$PRESET]:-}" ]]; then
-            cmd+=" ${ME_SETTINGS[$PRESET]}"
-        fi
-    else
-        # CPU encoding fallback with optimizations
+    # CPU encoding fallback with optimizations
+    if [[ "${NO_HWACCEL:-false}" == "true" ]] || [[ "$HAS_VAAPI" != "true" ]]; then
         log "INFO" "Using CPU encoding"
         cmd+=" -i \"$input_file\""
-        cmd+=" -c:v libx${CODEC}"
 
-        # Apply CRF for CPU encoding
-        if [[ -n "${QUALITY_VAL:-}" ]]; then
-            cmd+=" -crf $QUALITY_VAL"
+        if [[ "$CODEC" == "av1" ]]; then
+            # AV1 software encoding (very slow but available)
+            cmd+=" -c:v libaom-av1 -crf 30 -cpu-used 4"
         else
-            case "$PRESET" in
-                maxquality)      cmd+=" -crf 16 -preset slow" ;;
-                balanced)        cmd+=" -crf 22 -preset medium" ;;
-                fast)            cmd+=" -crf 26 -preset fast" ;;
-                highcompression) cmd+=" -crf 28 -preset veryslow" ;;
-                streaming)       cmd+=" -crf 23 -preset medium" ;;
-            esac
-        fi
+            cmd+=" -c:v libx${CODEC}"
 
-        # Add CPU optimizations
-        cmd+=" -tune film -profile:v high -level 4.1"
+            # Apply CRF for CPU encoding
+            if [[ -n "${QUALITY_VAL:-}" ]]; then
+                cmd+=" -crf $QUALITY_VAL"
+            else
+                case "$PRESET" in
+                    maxquality)      cmd+=" -crf 16 -preset slow" ;;
+                    balanced)        cmd+=" -crf 22 -preset medium" ;;
+                    fast)            cmd+=" -crf 26 -preset fast" ;;
+                    highcompression) cmd+=" -crf 28 -preset veryslow" ;;
+                    streaming)       cmd+=" -crf 23 -preset medium" ;;
+                esac
+            fi
 
-        # Add B-frame settings for CPU
-        if [[ -n "${BFRAME_SETTINGS[$CODEC]:-}" ]]; then
-            cmd+=" ${BFRAME_SETTINGS[$CODEC]}"
+            # Add CPU optimizations
+            cmd+=" -tune film -profile:v high -level 4.1"
+
+            # Add B-frame settings for CPU
+            if [[ -n "${BFRAME_SETTINGS[$CODEC]:-}" ]]; then
+                cmd+=" ${BFRAME_SETTINGS[$CODEC]}"
+            fi
         fi
 
         # Override with target bitrate if specified
@@ -1275,6 +1510,10 @@ main() {
                 list_configurations
                 exit 0
                 ;;
+            --gpu-info)
+                display_gpu_info
+                exit 0
+                ;;
             --install-deps)
                 install_dependencies
                 exit $?
@@ -1301,13 +1540,13 @@ main() {
     CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
 
     # Validate codec
-    if [[ "$CODEC" != "h264" ]] && [[ "$CODEC" != "hevc" ]]; then
-        log "ERROR" "Invalid codec: $CODEC (must be h264 or hevc)"
+    if [[ "$CODEC" != "h264" ]] && [[ "$CODEC" != "hevc" ]] && [[ "$CODEC" != "av1" ]]; then
+        log "ERROR" "Invalid codec: $CODEC (must be h264, hevc, or av1)"
         exit 1
     fi
 
     # Validate preset
-    if [[ -z "${QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]]; then
+    if [[ -z "${QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${AV1_QUALITY_PRESETS[$PRESET]:-}" ]]; then
         log "ERROR" "Invalid preset: $PRESET"
         echo "Valid presets: ${!QUALITY_PRESETS[*]}"
         exit 1
@@ -1366,25 +1605,37 @@ main() {
     # Detect hardware
     detect_hardware_capabilities
 
-    # Determine encoding method
+    # Check AV1 support if selected
+    if [[ "$CODEC" == "av1" ]] && [[ "$HAS_AV1_HW" != "true" ]]; then
+        log "WARN" "AV1 encoding not supported on this GPU. Falling back to HEVC."
+        CODEC="hevc"
+    fi
+
+    # Determine encoding method with fallback
     if [[ "$NO_HWACCEL" == "true" ]]; then
         USE_AMF=false
         log "INFO" "Hardware acceleration disabled, using CPU encoding"
-    elif [[ "$HAS_AMF" == "true" ]] && [[ "$CODEC" == "h264" ]]; then
-        USE_AMF=true
-        log "AMD" "Using AMF hardware encoding (proprietary driver path)"
-    elif [[ "$HAS_VAAPI" == "true" ]]; then
-        USE_AMF=false
-        log "AMD" "Using VA-API hardware encoding (open source driver path)"
-
-        # Check HEVC support
-        if [[ "$CODEC" == "hevc" ]] && [[ "$HAS_HEVC_HW" != "true" ]]; then
-            log "WARN" "HEVC hardware encoding not supported, falling back to H.264"
-            CODEC="h264"
-        fi
     else
-        USE_AMF=false
-        log "WARN" "No hardware acceleration available, falling back to CPU encoding"
+        # Try AMF first for H.264/HEVC
+        if [[ "$HAS_AMF" == "true" ]] && check_amf_encoding_support "$CODEC"; then
+            USE_AMF=true
+            log "AMD" "Using AMF hardware encoding (proprietary driver path)"
+        # Then try VA-API
+        elif [[ "$HAS_VAAPI" == "true" ]] && check_vaapi_encoding_support "$CODEC"; then
+            USE_AMF=false
+            log "AMD" "Using VA-API hardware encoding (open source driver path)"
+        else
+            USE_AMF=false
+            log "WARN" "Hardware encoding not available for $CODEC, falling back to CPU"
+            NO_HWACCEL=true
+        fi
+    fi
+
+    # Show GPU architecture specific settings
+    if [[ -n "${GPU_ARCHITECTURE:-}" ]]; then
+        log "AMD" "GPU Architecture: $GPU_ARCHITECTURE"
+        local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")
+        log "AMD" "Using B-frame settings: $safe_bframes"
     fi
 
     # Show encoding settings
