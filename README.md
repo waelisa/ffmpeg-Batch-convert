@@ -49,16 +49,22 @@ Launch the visual builder to select codecs, resolutions, and quality presets:
 
 Advanced Examples
 
-Goal	Command
-
-Max Quality Archiving	./ffmpeg-Batch-convert.sh -p maxquality *.mp4
-
-4K Streaming Optimization	./ffmpeg-Batch-convert.sh -r 4K -p streaming *.mkv
-
-AV1 (RX 7000 only)	./ffmpeg-Batch-convert.sh -c av1 -p balanced *.mkv
-
-Preserve Textures/Grain	./ffmpeg-Batch-convert.sh --texture-preserve *.mov
-
+Max Quality Archiving
+```bash
+./ffmpeg-Batch-convert.sh -p maxquality *.mp4
+```
+4K Streaming Optimization	
+```bash
+./ffmpeg-Batch-convert.sh -r 4K -p streaming *.mkv
+```
+AV1 (RX 7000 only)	
+```bash
+./ffmpeg-Batch-convert.sh -c av1 -p balanced *.mkv
+```
+Preserve Textures/Grain	
+```bash
+./ffmpeg-Batch-convert.sh --texture-preserve *.mov
+```
 Check GPU Architecture	./ffmpeg-Batch-convert.sh --gpu-info
 
 📊 Quality Presets
