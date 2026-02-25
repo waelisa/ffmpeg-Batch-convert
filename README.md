@@ -5,6 +5,7 @@
 [![Bash](https://img.shields.io/badge/Shell-Bash-4EAA25.svg)](https://www.gnu.org/software/bash/)
 
 An advanced Bash script for high-performance batch video conversion leveraging AMD Advanced Media Framework (AMF) and VA-API. Designed specifically for AMD VGA owners to achieve professional-grade encoding with minimal CPU usage.
+
 🚀 Features
 
     Universal AMD Support: Optimized presets for Polaris (RX 400/500), Vega, RDNA 1 (RX 5000), RDNA 2 (RX 6000), and RDNA 3 (RX 7000).
@@ -22,6 +23,7 @@ An advanced Bash script for high-performance batch video conversion leveraging A
     Auto-Dependency: Detects your Linux distribution and installs required drivers and tools automatically.
 
 📦 Installation
+
 1. Download the script
 ```bash
 wget https://github.com/waelisa/ffmpeg-Batch-convert/raw/refs/heads/main/ffmpeg-Batch-convert.sh
