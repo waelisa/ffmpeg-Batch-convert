@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.11
+# Version: 1.1.12
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -42,6 +42,11 @@
 #   ./ffmpeg-Batch-convert.sh -c h264 -p fast *.webm to mp4
 #   ./ffmpeg-Batch-convert.sh -c hevc -q 20 --target-size 700M movie.mkv to mp4
 #
+#   NOTE: `to FORMAT` sets the *container*. `-c CODEC` sets the *video
+#   codec*. When both are given, `-c` wins — e.g.
+#       ./ffmpeg-Batch-convert.sh -c hevc -p maxquality *.mkv to mkv
+#   produces HEVC inside an MKV container.
+#
 # DRY RUN (print the ffmpeg command without executing):
 #
 #   ./ffmpeg-Batch-convert.sh --dry-run all to mp4
@@ -51,7 +56,7 @@
 #   ./ffmpeg-Batch-convert.sh --check-deps
 #   ./ffmpeg-Batch-convert.sh --gpu-info
 #
-# INSTALL MISSING DEPENDENCIES (must be run with sudo):
+# INSTALL MISSING DEPENDENCIES (must be run with sudo — note the ./):
 #
 #   sudo ./ffmpeg-Batch-convert.sh --install-deps
 #
@@ -68,7 +73,7 @@
 # ============================================================================
 #
 #   - Universal AMD GPU support (Polaris, Vega, RDNA 1/2/3)
-#   - Automatic dependency installation
+#   - Automatic dependency installation (distro-aware, Arch/Fedora safe)
 #   - Multi-distribution support (apt, dnf, pacman, zypper)
 #   - AMD GPU detection and VA-API/AMF support
 #   - AV1 encoding support for RDNA 3
@@ -88,6 +93,27 @@
 # ============================================================================
 # CHANGELOG
 # ============================================================================
+#
+#   v1.1.12 - Fixed dependency installation on Arch and Fedora:
+#             - Added distro-aware package name mapping. On Arch and
+#               Fedora, `vainfo` is provided by `libva-utils`, NOT by a
+#               package called `vainfo`. The old code ran
+#               `pacman -S --noconfirm vainfo bc ...` and failed with
+#               "error: target not found: vainfo".
+#             - `--install-deps` now also pulls `libva-mesa-driver` on
+#               Arch (and `mesa-va-drivers` on Debian/Fedora), so VA-API
+#               works out of the box after installation.
+#             - Deduplicated the package list (ffmpeg / ffprobe now map
+#               to a single `ffmpeg` package instead of appearing twice).
+#           - Fixed `-c CODEC` being masked by `to FORMAT`:
+#             `to` is now parsed inside the main argument loop, so
+#             `./script.sh -c hevc -p maxquality *.mkv to mkv` correctly
+#             uses HEVC, and the "Detected output format" log reports the
+#             real codec instead of the container default.
+#           - Log/usage messages now consistently show `sudo ./script.sh`
+#             (with the `./`) so the shell can actually find the script.
+#           - Added a clearer error when `to` is given without a format,
+#             and rejected multiple `to` clauses in a single invocation.
 #
 #   v1.1.11 - FIXED critical batch bug: ((success_count++)) under `set -e`
 #             returns non-zero when the counter was 0, aborting the script
@@ -136,7 +162,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.11"
+VERSION="1.1.12"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -160,9 +186,43 @@ DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
 INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob")
 
-# Required dependencies
+# Required dependencies (command name → what we actually need)
 REQUIRED_COMMANDS=("ffmpeg" "vainfo" "lspci" "bc" "ffprobe")
-REQUIRED_PACKAGES=("ffmpeg" "vainfo" "pciutils" "bc" "ffmpeg")
+
+# ---------------------------------------------------------------------------
+# Distro-specific package names for each required command.
+# On Arch and Fedora the `vainfo` binary is shipped by `libva-utils`,
+# NOT by a package literally called `vainfo`. That is what broke
+# `--install-deps` on Arch in v1.1.11.
+# ---------------------------------------------------------------------------
+declare -A APT_PACKAGES=(
+    [ffmpeg]="ffmpeg"
+    [vainfo]="vainfo"
+    [lspci]="pciutils"
+    [bc]="bc"
+    [ffprobe]="ffmpeg"
+)
+declare -A DNF_PACKAGES=(
+    [ffmpeg]="ffmpeg"
+    [vainfo]="libva-utils"
+    [lspci]="pciutils"
+    [bc]="bc"
+    [ffprobe]="ffmpeg"
+)
+declare -A PACMAN_PACKAGES=(
+    [ffmpeg]="ffmpeg"
+    [vainfo]="libva-utils"
+    [lspci]="pciutils"
+    [bc]="bc"
+    [ffprobe]="ffmpeg"
+)
+declare -A ZYPPER_PACKAGES=(
+    [ffmpeg]="ffmpeg"
+    [vainfo]="libva-utils"
+    [lspci]="pciutils"
+    [bc]="bc"
+    [ffprobe]="ffmpeg"
+)
 
 # Supported output formats and their default codecs
 declare -A OUTPUT_FORMATS=(
@@ -405,8 +465,8 @@ print_usage() {
     echo -e "    # Check dependencies first" >&2
     echo -e "    $SCRIPT_NAME --check-deps" >&2
     echo >&2
-    echo -e "    # Install missing dependencies (requires sudo)" >&2
-    echo -e "    sudo $SCRIPT_NAME --install-deps" >&2
+    echo -e "    # Install missing dependencies (requires sudo — note the ./)" >&2
+    echo -e "    sudo ./$SCRIPT_NAME --install-deps" >&2
     echo >&2
     echo -e "    # Convert ONE WebM to MP4 (VP9/Opus -> H.264/AAC)" >&2
     echo -e "    $SCRIPT_NAME video.webm to mp4" >&2
@@ -419,6 +479,9 @@ print_usage() {
     echo >&2
     echo -e "    # Batch with a codec/preset override" >&2
     echo -e "    $SCRIPT_NAME -c hevc -p maxquality all to mp4" >&2
+    echo >&2
+    echo -e "    # Same, but keep the mkv container (HEVC inside MKV)" >&2
+    echo -e "    $SCRIPT_NAME -c hevc -p maxquality *.mkv to mkv" >&2
     echo >&2
     echo -e "    # Dry run (shows the ffmpeg command for every file)" >&2
     echo -e "    $SCRIPT_NAME --dry-run all to mp4" >&2
@@ -514,6 +577,25 @@ collect_all_videos_in_cwd() {
 # Dependency Checking & Installation
 # ============================================
 
+# Translate a required command name into the package name for the
+# detected package manager. Falls back to the command name itself.
+get_package_name_for_command() {
+    local pkg_mgr="$1"
+    local cmd="$2"
+    case "$pkg_mgr" in
+        apt)    echo "${APT_PACKAGES[$cmd]:-$cmd}" ;;
+        dnf)    echo "${DNF_PACKAGES[$cmd]:-$cmd}" ;;
+        pacman) echo "${PACMAN_PACKAGES[$cmd]:-$cmd}" ;;
+        zypper) echo "${ZYPPER_PACKAGES[$cmd]:-$cmd}" ;;
+        *)      echo "$cmd" ;;
+    esac
+}
+
+# Deduplicate an array on stdout (newline-separated).
+dedupe_lines() {
+    awk '!seen[$0]++' <<< "$1"
+}
+
 check_dependencies() {
     local missing=()
     local available=()
@@ -538,7 +620,7 @@ check_dependencies() {
         return 0
     else
         echo -e "${YELLOW}Missing dependencies: ${missing[*]}${NC}" >&2
-        echo -e "${YELLOW}Run 'sudo $SCRIPT_NAME --install-deps' to install missing dependencies${NC}" >&2
+        echo -e "${YELLOW}Run 'sudo ./$SCRIPT_NAME --install-deps' to install missing dependencies${NC}" >&2
         return 1
     fi
 }
@@ -588,15 +670,20 @@ get_install_command() {
 install_dependencies() {
     log "INFO" "Checking and installing dependencies..."
 
+    local distro=$(detect_distribution)
+    local pkg_manager=$(get_package_manager "$distro")
+
+    log "INFO" "Detected distribution: $distro"
+    log "INFO" "Using package manager: $pkg_manager"
+
     local missing_deps=()
     local missing_packages=()
 
-    for i in "${!REQUIRED_COMMANDS[@]}"; do
-        local cmd="${REQUIRED_COMMANDS[$i]}"
-        local pkg="${REQUIRED_PACKAGES[$i]}"
-
+    for cmd in "${REQUIRED_COMMANDS[@]}"; do
         if ! check_command "$cmd"; then
             missing_deps+=("$cmd")
+            local pkg
+            pkg=$(get_package_name_for_command "$pkg_manager" "$cmd")
             missing_packages+=("$pkg")
         fi
     done
@@ -606,17 +693,17 @@ install_dependencies() {
         return 0
     fi
 
+    # Deduplicate (ffmpeg and ffprobe both map to package "ffmpeg")
+    local pkg_list
+    pkg_list=$(printf '%s\n' "${missing_packages[@]}" | dedupe_lines)
+    mapfile -t missing_packages <<< "$pkg_list"
+
     log "INFO" "Missing dependencies: ${missing_deps[*]}"
-
-    local distro=$(detect_distribution)
-    local pkg_manager=$(get_package_manager "$distro")
-
-    log "INFO" "Detected distribution: $distro"
-    log "INFO" "Using package manager: $pkg_manager"
+    log "INFO" "Packages to install: ${missing_packages[*]}"
 
     if [[ $EUID -ne 0 ]]; then
         log "ERROR" "Dependencies need to be installed, but script is not running as root."
-        log "ERROR" "Please run: sudo $SCRIPT_NAME --install-deps"
+        log "ERROR" "Please run: sudo ./$SCRIPT_NAME --install-deps"
 
         echo -e "\n${YELLOW}Manual installation commands for your distribution:${NC}" >&2
         for pkg in "${missing_packages[@]}"; do
@@ -649,8 +736,10 @@ install_dependencies() {
 
         pacman)
             log "INFO" "Installing packages: ${missing_packages[*]}"
-            pacman -S --noconfirm "${missing_packages[@]}" libva-mesa-driver \
-                libva-utils
+            # libva-utils provides the `vainfo` binary on Arch; the extra
+            # libva-mesa-driver is the actual AMD VA-API backend.
+            pacman -S --noconfirm --needed "${missing_packages[@]}" \
+                libva-mesa-driver libva-utils
             ;;
 
         zypper)
@@ -662,7 +751,7 @@ install_dependencies() {
         *)
             log "ERROR" "Unsupported distribution for automatic installation"
             echo -e "\n${YELLOW}Please install manually:${NC}" >&2
-            echo "  ffmpeg, vainfo, pciutils, bc" >&2
+            echo "  ffmpeg, vainfo (from libva-utils), pciutils, bc" >&2
             return 1
             ;;
     esac
@@ -699,7 +788,7 @@ install_gum() {
     local pkg_manager=$(get_package_manager "$distro")
 
     if [[ $EUID -ne 0 ]]; then
-        log "WARN" "Need root to install gum. Please run: sudo $0 --install-deps"
+        log "WARN" "Need root to install gum. Please run: sudo ./$SCRIPT_NAME --install-deps"
         return 1
     fi
 
@@ -1167,6 +1256,7 @@ display_gpu_info() {
             echo -e "${YELLOW}Mesa Drivers:${NC} ✗ Not detected (may affect performance)" >&2
             echo -e "${YELLOW}  Install with: sudo apt install mesa-va-drivers (Ubuntu/Debian)${NC}" >&2
             echo -e "${YELLOW}  or: sudo dnf install mesa-va-drivers (Fedora)${NC}" >&2
+            echo -e "${YELLOW}  or: sudo pacman -S libva-mesa-driver (Arch)${NC}" >&2
         fi
 
         if check_vaapi_support; then
@@ -1322,7 +1412,7 @@ calculate_bitrate_for_target_size() {
 
     if ! check_command "bc"; then
         log "ERROR" "bc calculator not found. Please install bc first."
-        log "INFO" "Run: sudo $SCRIPT_NAME --install-deps"
+        log "INFO" "Run: sudo ./$SCRIPT_NAME --install-deps"
         return 1
     fi
 
@@ -1738,7 +1828,7 @@ process_file() {
 
         if is_vob_file "$input_file" && [[ "${FORCE_PROCESS:-false}" != "true" ]]; then
             log "INFO" "Tip: VOB files often need forced processing. Try:"
-            log "INFO" "  $SCRIPT_NAME --force-process -p dvd \"$input_file\" to $CONTAINER"
+            log "INFO" "  ./$SCRIPT_NAME --force-process -p dvd \"$input_file\" to $CONTAINER"
         fi
 
         return 1
@@ -1788,56 +1878,22 @@ process_files() {
 # ============================================
 
 main() {
-    # ------------------------------------------------------------------
-    # Safe "to FORMAT" parsing — no eval, preserves filenames with spaces
-    # ------------------------------------------------------------------
-    local -a clean_args=()
-    local next_is_format=0
-    local found_format=""
-    for arg in "$@"; do
-        if [[ $next_is_format -eq 1 ]]; then
-            found_format="$arg"
-            next_is_format=0
-            continue
-        fi
-        if [[ "$arg" == "to" ]]; then
-            next_is_format=1
-            continue
-        fi
-        clean_args+=("$arg")
-    done
+    print_banner
 
-    if [[ -n "$found_format" ]]; then
-        if is_valid_output_format "$found_format"; then
-            CONTAINER="$found_format"
-            if [[ -z "${CODEC:-}" ]]; then
-                CODEC="$(get_default_codec_for_format "$CONTAINER")"
-            fi
-            log "INFO" "Detected output format: $CONTAINER (using $CODEC codec)"
-            if [[ ${#clean_args[@]} -gt 0 ]]; then
-                set -- "${clean_args[@]}"
-            else
-                set --
-            fi
-        else
-            log "ERROR" "Invalid output format after 'to': $found_format"
-            echo "Supported formats: ${!OUTPUT_FORMATS[*]}" >&2
-            exit 1
-        fi
-    else
-        if [[ ${#clean_args[@]} -gt 0 ]]; then
-            set -- "${clean_args[@]}"
-        fi
-    fi
-
-    # Parse command line arguments
+    # ------------------------------------------------------------------
+    # Parse arguments in a single pass.
+    #
+    # `to FORMAT` is handled HERE (inside the main loop) rather than as a
+    # pre-pass. That guarantees `-c CODEC` is applied before the format's
+    # default codec is resolved, and it lets us log the *actual* codec.
+    # ------------------------------------------------------------------
     local files=()
     local use_all_keyword=false
+    local found_format=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
-                print_banner
                 print_usage
                 exit 0
                 ;;
@@ -1982,6 +2038,21 @@ main() {
                 display_gpu_info
                 exit 0
                 ;;
+            to)
+                # `to FORMAT` — the format is the next argument.
+                shift
+                if [[ $# -eq 0 ]]; then
+                    log "ERROR" "'to' must be followed by a format (e.g., 'to mp4')"
+                    echo "Supported formats: ${!OUTPUT_FORMATS[*]}" >&2
+                    exit 1
+                fi
+                if [[ -n "$found_format" ]]; then
+                    log "ERROR" "Multiple 'to FORMAT' clauses are not allowed"
+                    exit 1
+                fi
+                found_format="$1"
+                shift
+                ;;
             -*)
                 log "ERROR" "Unknown option: $1"
                 print_usage
@@ -2001,24 +2072,36 @@ main() {
         esac
     done
 
-    print_banner
-
-    if ! check_command "bc"; then
-        log "ERROR" "bc calculator not found. This is required for bitrate calculation."
-        log "INFO" "Please install bc first:"
-        log "INFO" "  sudo $SCRIPT_NAME --install-deps"
-        log "INFO" "Or run: sudo ./$SCRIPT_NAME --install-deps"
-        exit 1
+    # ------------------------------------------------------------------
+    # Apply format resolution AFTER all arguments are parsed, so that
+    # `-c hevc` is never clobbered by the container's default codec.
+    # ------------------------------------------------------------------
+    if [[ -n "$found_format" ]]; then
+        if ! is_valid_output_format "$found_format"; then
+            log "ERROR" "Invalid output format after 'to': $found_format"
+            echo "Supported formats: ${!OUTPUT_FORMATS[*]}" >&2
+            exit 1
+        fi
+        CONTAINER="$found_format"
     fi
 
-    CODEC="${CODEC:-$DEFAULT_CODEC}"
+    CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
+    CODEC="${CODEC:-$(get_default_codec_for_format "$CONTAINER")}"
     PRESET="${PRESET:-$DEFAULT_QUALITY}"
     AUDIO_BITRATE="${AUDIO_BITRATE:-$DEFAULT_AUDIO_BITRATE}"
-    CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
+
+    log "INFO" "Detected output format: $CONTAINER (using $CODEC codec)"
 
     if ! is_valid_output_format "$CONTAINER"; then
         log "ERROR" "Invalid output format: $CONTAINER"
         echo "Supported formats: ${!OUTPUT_FORMATS[*]}" >&2
+        exit 1
+    fi
+
+    if ! check_command "bc"; then
+        log "ERROR" "bc calculator not found. This is required for bitrate calculation."
+        log "INFO" "Please install bc first:"
+        log "INFO" "  sudo ./$SCRIPT_NAME --install-deps"
         exit 1
     fi
 
