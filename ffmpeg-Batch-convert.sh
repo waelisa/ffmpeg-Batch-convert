@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.12
+# Version: 1.1.13
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -25,10 +25,6 @@
 #   ./ffmpeg-Batch-convert.sh --all to mp4     <- same, as a flag
 #   ./ffmpeg-Batch-convert.sh * to mp4         <- also works, but relies
 #                                                 on shell globbing
-#
-# The `all` keyword scans the current directory and picks every file
-# whose extension is in the supported list below. Non-video files
-# (this script, logs, configs, READMEs, subdirectories) are skipped.
 #
 # BATCH CONVERSION — SPECIFIC PATTERNS:
 #
@@ -78,7 +74,7 @@
 #   - AMD GPU detection and VA-API/AMF support
 #   - AV1 encoding support for RDNA 3
 #   - Smart B-frame management per GPU architecture
-#   - Zero-copy hardware pipeline (fixed VA-API)
+#   - Zero-copy hardware pipeline (correct VA-API filter ordering)
 #   - HQVBR for consistent quality
 #   - Cross-format: webm→mp4, mp4→webm, mkv→mp4, and more
 #   - Container-aware audio codec (aac / opus / vorbis / mp3)
@@ -89,57 +85,79 @@
 #   - Fixed dry run output (no duplicate commands)
 #   - Enhanced HEVC/VA-API compatibility
 #   - Improved B-frame settings for RDNA 3
+#   - Array-based ffmpeg invocation (no eval; shell-safe filenames)
 #
 # ============================================================================
 # CHANGELOG
 # ============================================================================
 #
+#   v1.1.13 - Fixed VA-API filter chain ordering. On the software-decode
+#             path the hardware filters (deinterlace_vaapi, denoise_vaapi,
+#             crop_vaapi, scale_vaapi) were being *prepended* to
+#             "format=nv12,hwupload", so they received CPU frames and
+#             ffmpeg aborted with "Invalid output format" /
+#             "Hardware format ... is not supported by ...". The chain is
+#             now built as
+#                 [fps,]format=nv12,hwupload[,deinterlace_vaapi][,denoise_vaapi]
+#                                              [,crop_vaapi][,scale_vaapi]
+#             and hardware decode still runs the *_vaapi filters directly
+#             on VA-API surfaces (with a download/upload wrapper only when
+#             a CPU-only filter such as fps is requested).
+#           - Replaced the eval-based command execution with a proper Bash
+#             array (FFMPEG_CMD). Filenames containing spaces, quotes,
+#             dollar signs, semicolons, ampersands, or nested quotes are
+#             now safely passed through without word splitting or command
+#             injection. Dry-run output uses printf '%q ' so it can be
+#             copy-pasted back into a shell.
+#           - Added `shopt -s nullglob` inside collect_all_videos_in_cwd
+#             (and the implicit CWD fallback) so an empty directory no
+#             longer iterates over the literal string "*".
+#           - Extension validation is now O(1) via the new associative
+#             array INPUT_EXTENSIONS_MAP. The old linear scan over
+#             INPUT_EXTENSIONS was perfectly correct but unnecessary.
+#           - -vbaq / -preanalysis / -open_gop overrides are now applied
+#             by walking the argument array (apply_preset_overrides)
+#             instead of patching a command string with ${cmd/find/replace}
+#             (which silently failed once presets were moved to arrays).
+#
 #   v1.1.12 - Fixed dependency installation on Arch and Fedora:
 #             - Added distro-aware package name mapping. On Arch and
 #               Fedora, `vainfo` is provided by `libva-utils`, NOT by a
-#               package called `vainfo`. The old code ran
-#               `pacman -S --noconfirm vainfo bc ...` and failed with
-#               "error: target not found: vainfo".
+#               package called `vainfo`.
 #             - `--install-deps` now also pulls `libva-mesa-driver` on
 #               Arch (and `mesa-va-drivers` on Debian/Fedora), so VA-API
 #               works out of the box after installation.
-#             - Deduplicated the package list (ffmpeg / ffprobe now map
-#               to a single `ffmpeg` package instead of appearing twice).
-#           - Fixed `-c CODEC` being masked by `to FORMAT`:
-#             `to` is now parsed inside the main argument loop, so
-#             `./script.sh -c hevc -p maxquality *.mkv to mkv` correctly
-#             uses HEVC, and the "Detected output format" log reports the
-#             real codec instead of the container default.
-#           - Log/usage messages now consistently show `sudo ./script.sh`
-#             (with the `./`) so the shell can actually find the script.
-#           - Added a clearer error when `to` is given without a format,
-#             and rejected multiple `to` clauses in a single invocation.
+#             - Deduplicated the package list.
+#           - Fixed `-c CODEC` being masked by `to FORMAT`: `to` is now
+#             parsed inside the main argument loop.
+#           - Log/usage messages now consistently show `sudo ./script.sh`.
 #
 #   v1.1.11 - FIXED critical batch bug: ((success_count++)) under `set -e`
 #             returns non-zero when the counter was 0, aborting the script
 #             right after the first file. Replaced with arithmetic
 #             assignment `x=$((x + 1))` which always returns 0.
-#           - Added `all` positional keyword (and `--all` flag): scans the
-#             current directory for supported video files. Shell-glob safe.
+#           - Added `all` positional keyword (and `--all` flag).
 #           - Fixed empty-array expansion under `set -u` (bash < 4.4).
 #           - Renamed local `basename` variable that shadowed the command.
 #           - Deduplicated the `*.$ext` fallback loop (vob / VOB collision).
+#
 #   v1.1.10 - Wildcard support: `./script.sh * to mp4` now works cleanly.
 #           - Added "HOW TO USE" section to the header.
 #           - Non-video files are silently skipped when a glob is expanded.
 #           - Added --no-filter to disable input extension filtering.
+#
 #   v1.1.9 - Cross-format conversion overhaul:
 #           - Added AUDIO_CODECS map (aac/opus/vorbis/mp3 per container)
 #           - Replaced fragile "eval set --" arg parsing with array-based
 #             parsing (fixes filenames with spaces / special characters)
 #           - Removed detect_output_format_from_args / remove_to_args
-#           - Fixed VAAPI presets: removed invalid -quality/-compression_level
-#             options that caused h264_vaapi to abort immediately
-#           - AMF path no longer forces VA-API decode (fixes webm/mp4 input)
-#           - Guarded -map_metadata for containers that reject it (webm/ogv)
-#           - Added stream mapping for mp4/m4v/mov to drop unsupported streams
+#           - Fixed VAAPI presets
+#           - AMF path no longer forces VA-API decode
+#           - Guarded -map_metadata for containers that reject it
+#           - Added stream mapping for mp4/m4v/mov
 #           - Optional VA-API hardware decode for h264/hevc input
-#           - VP9/Theora remain CPU-encoded as before
+#           - VP9/Theora remain CPU-encoded
+#
 #   v1.1.8 - Fixed dry run output duplication
 #           - Enhanced HEVC VA-API compatibility
 #           - Improved B-frame settings for RDNA 3
@@ -162,7 +180,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.12"
+VERSION="1.1.13"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -186,14 +204,21 @@ DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
 INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob")
 
+# O(1) lookup map for extension validation. Built from INPUT_EXTENSIONS
+# right after the array is declared, so the two never drift.
+declare -A INPUT_EXTENSIONS_MAP=()
+for _ext in "${INPUT_EXTENSIONS[@]}"; do
+    INPUT_EXTENSIONS_MAP["$_ext"]=1
+done
+unset _ext
+
 # Required dependencies (command name → what we actually need)
 REQUIRED_COMMANDS=("ffmpeg" "vainfo" "lspci" "bc" "ffprobe")
 
 # ---------------------------------------------------------------------------
 # Distro-specific package names for each required command.
 # On Arch and Fedora the `vainfo` binary is shipped by `libva-utils`,
-# NOT by a package literally called `vainfo`. That is what broke
-# `--install-deps` on Arch in v1.1.11.
+# NOT by a package literally called `vainfo`.
 # ---------------------------------------------------------------------------
 declare -A APT_PACKAGES=(
     [ffmpeg]="ffmpeg"
@@ -280,6 +305,11 @@ GPU_ARCHITECTURE="${GPU_ARCHITECTURE:-UNKNOWN}"
 RENDER_DEVICE="${RENDER_DEVICE:-}"
 FORCE_PROCESS="${FORCE_PROCESS:-false}"
 NO_FILTER="${NO_FILTER:-false}"
+
+# Global array populated by build_ffmpeg_command and consumed by
+# process_file. Declared here so it exists under `set -u` even if
+# build_ffmpeg_command is never called.
+declare -ga FFMPEG_CMD=()
 
 # Resolution presets
 declare -A RESOLUTION_PRESETS=(
@@ -532,7 +562,8 @@ check_command() {
     return 0
 }
 
-# Returns 0 if the file extension is one of INPUT_EXTENSIONS (case-insensitive)
+# Returns 0 if the file extension is one of INPUT_EXTENSIONS (case-insensitive).
+# Uses the pre-built INPUT_EXTENSIONS_MAP for O(1) lookup.
 is_supported_input_file() {
     local filename="$1"
 
@@ -547,21 +578,15 @@ is_supported_input_file() {
     fi
     ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
 
-    local supported
-    for supported in "${INPUT_EXTENSIONS[@]}"; do
-        local sup_lower
-        sup_lower=$(printf '%s' "$supported" | tr '[:upper:]' '[:lower:]')
-        if [[ "$sup_lower" == "$ext" ]]; then
-            return 0
-        fi
-    done
-    return 1
+    [[ -n "${INPUT_EXTENSIONS_MAP[$ext]:-}" ]]
 }
 
 # Echo every supported video file in the current directory (one per line).
 # Used by the `all` keyword. Skips the script itself, its log, and its
-# output directory.
+# output directory. `nullglob` prevents the literal "*" from being passed
+# through when the directory is empty.
 collect_all_videos_in_cwd() {
+    shopt -s nullglob
     local f
     for f in *; do
         [[ -e "$f" ]] || continue
@@ -571,6 +596,7 @@ collect_all_videos_in_cwd() {
             printf '%s\n' "$f"
         fi
     done
+    shopt -u nullglob
 }
 
 # ============================================
@@ -1467,22 +1493,78 @@ probe_video_codec() {
         "$input_file" 2>/dev/null | head -1
 }
 
+# Split a whitespace-separated option string into words and append them
+# to the global FFMPEG_CMD array. Used for presets and B-frame overrides
+# whose contents are trusted internal strings.
+append_words() {
+    local str="$1"
+    [[ -z "$str" ]] && return 0
+    local -a _words=()
+    # Temporarily reset IFS to split on whitespace; the script's
+    # IFS=$'\n\t' would otherwise prevent splitting on spaces.
+    local IFS=' '
+    # shellcheck disable=SC2206
+    _words=($str)
+    if [[ ${#_words[@]} -gt 0 ]]; then
+        FFMPEG_CMD+=("${_words[@]}")
+    fi
+}
+
+# Walk FFMPEG_CMD and zero out -vbaq / -preanalysis / -open_gop values
+# when the corresponding NO_* flag is set. Replaces the old
+# ${cmd/"-vbaq 1"/"-vbaq 0"} string substitution, which no longer
+# applies now that we build an array.
+apply_preset_overrides() {
+    local i=0
+    local len=${#FFMPEG_CMD[@]}
+    while [[ $i -lt $len ]]; do
+        case "${FFMPEG_CMD[$i]}" in
+            -vbaq)
+                if [[ "${NO_VBAQ:-false}" == "true" ]] && [[ $((i + 1)) -lt $len ]]; then
+                    FFMPEG_CMD[$((i + 1))]="0"
+                fi
+                i=$((i + 2))
+                continue
+                ;;
+            -preanalysis)
+                if [[ "${NO_PREANALYSIS:-false}" == "true" ]] && [[ $((i + 1)) -lt $len ]]; then
+                    FFMPEG_CMD[$((i + 1))]="0"
+                fi
+                i=$((i + 2))
+                continue
+                ;;
+            -open_gop)
+                if [[ "${NO_OPENGOP:-false}" == "true" ]] && [[ $((i + 1)) -lt $len ]]; then
+                    FFMPEG_CMD[$((i + 1))]="0"
+                fi
+                i=$((i + 2))
+                continue
+                ;;
+        esac
+        i=$((i + 1))
+    done
+}
+
+# Populate the global FFMPEG_CMD array with a complete ffmpeg invocation.
+# Replaces the old string-building approach that required `eval`.
 build_ffmpeg_command() {
     local input_file="$1"
     local output_file="$2"
-    local cmd="ffmpeg"
+
+    FFMPEG_CMD=("ffmpeg")
 
     if [[ "${DEBUG:-false}" != "true" ]]; then
-        cmd+=" -loglevel error -stats"
+        FFMPEG_CMD+=("-loglevel" "error" "-stats")
     fi
 
     if is_vob_file "$input_file" && [[ "${FORCE_PROCESS:-false}" == "true" ]]; then
         log "WARN" "Forced processing enabled for VOB file - ignoring duration check"
-        cmd+=" -fflags +genpts+igndts"
+        FFMPEG_CMD+=("-fflags" "+genpts+igndts")
     fi
 
     if [[ -n "${TARGET_SIZE:-}" ]]; then
-        local calculated_bitrate=$(calculate_bitrate_for_target_size "$input_file" "$TARGET_SIZE")
+        local calculated_bitrate
+        calculated_bitrate=$(calculate_bitrate_for_target_size "$input_file" "$TARGET_SIZE")
         if [[ -n "$calculated_bitrate" ]]; then
             log "INFO" "Target size: $TARGET_SIZE, calculated bitrate: ${calculated_bitrate}k"
             USE_TARGET_BITRATE=true
@@ -1495,166 +1577,184 @@ build_ffmpeg_command() {
         input_codec=$(probe_video_codec "$input_file" || true)
     fi
 
+    local hw_path_taken=false
+
     if [[ "${NO_HWACCEL:-false}" != "true" ]] && [[ "${HAS_VAAPI:-false}" == "true" ]]; then
-        local driver_info=$(get_amd_driver_info)
+        local driver_info
+        driver_info=$(get_amd_driver_info)
         log "DEBUG" "Using AMD driver: $driver_info"
 
         if [[ "${USE_AMF:-false}" == "true" ]] && [[ "${HAS_AMF:-false}" == "true" ]] && check_amf_encoding_support "$CODEC"; then
             log "AMD" "Using AMF hardware encoding pipeline"
-            cmd+=" -i \"$input_file\""
-            cmd+=" -c:v ${CODEC}_amf"
+            hw_path_taken=true
+
+            FFMPEG_CMD+=("-i" "$input_file")
+            FFMPEG_CMD+=("-c:v" "${CODEC}_amf")
 
             if [[ "${USE_TARGET_BITRATE:-false}" == "true" ]]; then
-                cmd+=" -rc vbr_peak -b:v ${TARGET_VIDEO_BITRATE}k -maxrate $((TARGET_VIDEO_BITRATE * 2))k -bufsize $((TARGET_VIDEO_BITRATE * 4))k"
+                FFMPEG_CMD+=("-rc" "vbr_peak"
+                             "-b:v" "${TARGET_VIDEO_BITRATE}k"
+                             "-maxrate" "$((TARGET_VIDEO_BITRATE * 2))k"
+                             "-bufsize" "$((TARGET_VIDEO_BITRATE * 4))k")
             elif [[ "$CODEC" == "av1" ]] && [[ -n "${AV1_QUALITY_PRESETS[$PRESET]:-}" ]]; then
-                cmd+=" ${AV1_QUALITY_PRESETS[$PRESET]}"
+                append_words "${AV1_QUALITY_PRESETS[$PRESET]}"
             elif [[ -n "${QUALITY_PRESETS[$PRESET]:-}" ]]; then
-                cmd+=" ${QUALITY_PRESETS[$PRESET]}"
+                append_words "${QUALITY_PRESETS[$PRESET]}"
             fi
 
             if [[ -n "${QUALITY_VAL:-}" ]] && [[ "${USE_TARGET_BITRATE:-false}" != "true" ]]; then
                 if [[ "$PRESET" == "maxquality" ]] || [[ "$PRESET" == "cqp"* ]]; then
                     if [[ "$CODEC" == "av1" ]]; then
-                        cmd+=" -qp $QUALITY_VAL"
+                        FFMPEG_CMD+=("-qp" "$QUALITY_VAL")
                     else
-                        cmd+=" -qp_i $QUALITY_VAL -qp_p $QUALITY_VAL -qp_b $((QUALITY_VAL + 2))"
+                        FFMPEG_CMD+=("-qp_i" "$QUALITY_VAL"
+                                     "-qp_p" "$QUALITY_VAL"
+                                     "-qp_b" "$((QUALITY_VAL + 2))")
                     fi
                 else
-                    cmd+=" -qvbr_quality_level $QUALITY_VAL"
+                    FFMPEG_CMD+=("-qvbr_quality_level" "$QUALITY_VAL")
                 fi
             fi
 
             if [[ "${TEXTURE_PRESERVE:-false}" == "true" ]]; then
-                cmd+=" ${TEXTURE_SETTINGS[preserve]}"
+                append_words "${TEXTURE_SETTINGS[preserve]}"
             fi
 
-            local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")
-            cmd+=" $safe_bframes"
+            append_words "$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")"
 
-            if [[ "${NO_VBAQ:-false}" == "true" ]]; then
-                cmd=${cmd/"-vbaq 1"/"-vbaq 0"}
-            fi
-
-            if [[ "${NO_PREANALYSIS:-false}" == "true" ]]; then
-                cmd=${cmd/"-preanalysis 1"/"-preanalysis 0"}
-            fi
-
-            if [[ "${NO_OPENGOP:-false}" == "true" ]]; then
-                cmd=${cmd/"-open_gop 1"/"-open_gop 0"}
-            fi
+            # Zero out -vbaq / -preanalysis / -open_gop values per flags.
+            apply_preset_overrides
 
         elif check_vaapi_encoding_support "$CODEC"; then
             log "AMD" "Using VA-API hardware encoding pipeline"
+            hw_path_taken=true
 
             local hwdec_enabled=false
             if [[ "$input_codec" == "h264" || "$input_codec" == "hevc" ]]; then
                 if check_vaapi_decode_support "$input_codec"; then
                     log "AMD" "Hardware decode enabled for input: $input_codec"
-                    cmd+=" -hwaccel vaapi -hwaccel_device $RENDER_DEVICE -hwaccel_output_format vaapi"
+                    FFMPEG_CMD+=("-hwaccel" "vaapi"
+                                 "-hwaccel_device" "$RENDER_DEVICE"
+                                 "-hwaccel_output_format" "vaapi")
                     hwdec_enabled=true
                 fi
             fi
 
-            cmd+=" -vaapi_device $RENDER_DEVICE -i \"$input_file\""
+            FFMPEG_CMD+=("-vaapi_device" "$RENDER_DEVICE"
+                         "-i" "$input_file")
 
-            local filters="format=nv12,hwupload"
-            if [[ "$hwdec_enabled" == "true" ]]; then
-                filters=""
-            fi
+            # ------------------------------------------------------------------
+            # Build the filter chain respecting VA-API surface semantics.
+            #
+            # Hardware filters (deinterlace_vaapi, denoise_vaapi,
+            # crop_vaapi, scale_vaapi) REQUIRE VA-API surfaces as input.
+            # On the software-decode path we must therefore emit
+            # "format=nv12,hwupload" FIRST and append the hardware
+            # filters after it. On the hardware-decode path the input is
+            # already in VA-API surfaces and no upload is needed.
+            #
+            # fps is a CPU-only filter: it runs before hwupload on the
+            # software path, and is wrapped in download/upload on the
+            # hardware path (rare; kept for correctness).
+            # ------------------------------------------------------------------
 
+            # Hardware-side filters, in pipeline order.
+            local hw_filters=""
             if [[ "${DEINTERLACE:-false}" == "true" ]] || is_vob_file "$input_file"; then
                 if is_vob_file "$input_file" && [[ "${DEINTERLACE:-false}" != "true" ]]; then
                     log "INFO" "Auto-enabling deinterlacing for DVD/VOB file"
                 fi
-                if [[ -n "$filters" ]]; then
-                    filters="deinterlace_vaapi,$filters"
-                else
-                    filters="deinterlace_vaapi"
-                fi
+                hw_filters="${hw_filters:+$hw_filters,}deinterlace_vaapi"
             fi
-
             if [[ -n "${DENOISE:-}" ]]; then
                 case "$DENOISE" in
-                    low)    filters="denoise_vaapi=level=4${filters:+,$filters}" ;;
-                    medium) filters="denoise_vaapi=level=8${filters:+,$filters}" ;;
-                    high)   filters="denoise_vaapi=level=16${filters:+,$filters}" ;;
+                    low)    hw_filters="${hw_filters:+$hw_filters,}denoise_vaapi=level=4" ;;
+                    medium) hw_filters="${hw_filters:+$hw_filters,}denoise_vaapi=level=8" ;;
+                    high)   hw_filters="${hw_filters:+$hw_filters,}denoise_vaapi=level=16" ;;
                 esac
             fi
-
-            if [[ -n "${SCALE:-}" ]]; then
-                filters="scale_vaapi=$SCALE${filters:+,$filters}"
-            fi
-
             if [[ -n "${CROP:-}" ]]; then
-                filters="crop_vaapi=$CROP${filters:+,$filters}"
+                hw_filters="${hw_filters:+$hw_filters,}crop_vaapi=$CROP"
+            fi
+            if [[ -n "${SCALE:-}" ]]; then
+                hw_filters="${hw_filters:+$hw_filters,}scale_vaapi=$SCALE"
             fi
 
-            if [[ -n "${FPS:-}" ]]; then
-                filters="fps=$FPS${filters:+,$filters}"
+            # Assemble the final chain.
+            local filters=""
+            if [[ "$hwdec_enabled" == "true" ]]; then
+                # Input already in VA-API surfaces.
+                filters="$hw_filters"
+                if [[ -n "${FPS:-}" ]]; then
+                    # fps needs CPU frames — round-trip through system memory.
+                    local fps_segment="hwdownload,format=nv12,fps=$FPS,format=nv12,hwupload"
+                    filters="${fps_segment}${hw_filters:+,$hw_filters}"
+                fi
+            else
+                # Software decode: upload CPU frames, then run hardware filters.
+                local pre_upload=""
+                if [[ -n "${FPS:-}" ]]; then
+                    pre_upload="fps=$FPS,"
+                fi
+                filters="${pre_upload}format=nv12,hwupload${hw_filters:+,$hw_filters}"
             fi
 
             if [[ -n "$filters" ]]; then
-                cmd+=" -vf \"$filters\""
+                FFMPEG_CMD+=("-vf" "$filters")
             fi
 
-            cmd+=" -c:v ${CODEC}_vaapi"
+            FFMPEG_CMD+=("-c:v" "${CODEC}_vaapi")
 
             if [[ -n "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]]; then
-                cmd+=" ${VAAPI_QUALITY_PRESETS[$PRESET]}"
+                append_words "${VAAPI_QUALITY_PRESETS[$PRESET]}"
             fi
 
             if [[ "${USE_TARGET_BITRATE:-false}" == "true" ]]; then
-                cmd+=" -b:v ${TARGET_VIDEO_BITRATE}k"
+                FFMPEG_CMD+=("-b:v" "${TARGET_VIDEO_BITRATE}k")
             fi
 
-            local safe_bframes=$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")
-            cmd+=" $safe_bframes"
-        else
-            log "WARN" "Hardware encoding not available for $CODEC, falling back to CPU"
-            USE_AMF=false
-            HAS_VAAPI=false
+            append_words "$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")"
         fi
     fi
 
-    if [[ "${NO_HWACCEL:-false}" == "true" ]] || [[ "${HAS_VAAPI:-false}" != "true" ]]; then
+    if [[ "$hw_path_taken" != "true" ]]; then
         log "INFO" "Using CPU encoding"
-        cmd+=" -i \"$input_file\""
+        FFMPEG_CMD+=("-i" "$input_file")
 
         if [[ "$CODEC" == "av1" ]]; then
-            cmd+=" -c:v libaom-av1 -crf 30 -cpu-used 4 -b:v 0"
+            FFMPEG_CMD+=("-c:v" "libaom-av1" "-crf" "30" "-cpu-used" "4" "-b:v" "0")
         elif [[ "$CODEC" == "vp9" ]]; then
-            cmd+=" -c:v libvpx-vp9 -crf 30 -b:v 0 -cpu-used 4 -row-mt 1"
+            FFMPEG_CMD+=("-c:v" "libvpx-vp9" "-crf" "30" "-b:v" "0" "-cpu-used" "4" "-row-mt" "1")
         elif [[ "$CODEC" == "theora" ]]; then
-            cmd+=" -c:v libtheora -q:v 7"
+            FFMPEG_CMD+=("-c:v" "libtheora" "-q:v" "7")
         else
-            cmd+=" -c:v libx${CODEC}"
+            FFMPEG_CMD+=("-c:v" "libx${CODEC}")
 
             if [[ -n "${QUALITY_VAL:-}" ]]; then
-                cmd+=" -crf $QUALITY_VAL"
+                FFMPEG_CMD+=("-crf" "$QUALITY_VAL")
             else
                 case "$PRESET" in
-                    maxquality)      cmd+=" -crf 16 -preset slow" ;;
-                    balanced)        cmd+=" -crf 22 -preset medium" ;;
-                    fast)            cmd+=" -crf 26 -preset fast" ;;
-                    highcompression) cmd+=" -crf 28 -preset veryslow" ;;
-                    streaming)       cmd+=" -crf 23 -preset medium" ;;
-                    dvd)             cmd+=" -crf 22 -preset medium" ;;
+                    maxquality)      FFMPEG_CMD+=("-crf" "16" "-preset" "slow") ;;
+                    balanced)        FFMPEG_CMD+=("-crf" "22" "-preset" "medium") ;;
+                    fast)            FFMPEG_CMD+=("-crf" "26" "-preset" "fast") ;;
+                    highcompression) FFMPEG_CMD+=("-crf" "28" "-preset" "veryslow") ;;
+                    streaming)       FFMPEG_CMD+=("-crf" "23" "-preset" "medium") ;;
+                    dvd)             FFMPEG_CMD+=("-crf" "22" "-preset" "medium") ;;
                 esac
             fi
 
-            cmd+=" -tune film -profile:v high -level 4.1"
+            FFMPEG_CMD+=("-tune" "film" "-profile:v" "high" "-level" "4.1")
 
-            if [[ -n "${BFRAME_SETTINGS[$CODEC]:-}" ]]; then
-                cmd+=" ${BFRAME_SETTINGS[$CODEC]}"
-            fi
+            append_words "${BFRAME_SETTINGS[$CODEC]:-}"
         fi
 
         if [[ "${USE_TARGET_BITRATE:-false}" == "true" ]]; then
-            cmd+=" -b:v ${TARGET_VIDEO_BITRATE}k"
+            FFMPEG_CMD+=("-b:v" "${TARGET_VIDEO_BITRATE}k")
         fi
 
+        # CPU filter chain (yadif, hqdn3d, scale, crop, fps).
         local cpu_filters=""
-        if [[ -n "${DEINTERLACE:-}" && "${DEINTERLACE:-false}" == "true" ]] || is_vob_file "$input_file"; then
+        if [[ "${DEINTERLACE:-false}" == "true" ]] || is_vob_file "$input_file"; then
             cpu_filters="yadif${cpu_filters:+,$cpu_filters}"
         fi
         if [[ -n "${DENOISE:-}" ]]; then
@@ -1674,36 +1774,34 @@ build_ffmpeg_command() {
             cpu_filters="fps=$FPS${cpu_filters:+,$cpu_filters}"
         fi
         if [[ -n "$cpu_filters" ]]; then
-            cmd+=" -vf \"$cpu_filters\""
+            FFMPEG_CMD+=("-vf" "$cpu_filters")
         fi
     fi
 
     local audio_codec="${AUDIO_CODECS[$CONTAINER]:-aac}"
     if [[ "$audio_codec" == "libopus" ]]; then
-        cmd+=" -c:a libopus -b:a $AUDIO_BITRATE -strict -2"
+        FFMPEG_CMD+=("-c:a" "libopus" "-b:a" "$AUDIO_BITRATE" "-strict" "-2")
     else
-        cmd+=" -c:a $audio_codec -b:a $AUDIO_BITRATE"
+        FFMPEG_CMD+=("-c:a" "$audio_codec" "-b:a" "$AUDIO_BITRATE")
     fi
 
     if [[ -n "${TRIM:-}" ]]; then
-        cmd+=" -ss ${TRIM%:*} -t ${TRIM#*:}"
+        FFMPEG_CMD+=("-ss" "${TRIM%:*}" "-t" "${TRIM#*:}")
     fi
 
     if [[ "$CONTAINER" == "mp4" || "$CONTAINER" == "m4v" || "$CONTAINER" == "mov" ]]; then
-        cmd+=" -movflags +faststart"
+        FFMPEG_CMD+=("-movflags" "+faststart")
     fi
 
     if [[ "$CONTAINER" != "webm" && "$CONTAINER" != "ogv" ]]; then
-        cmd+=" -map_metadata 0"
+        FFMPEG_CMD+=("-map_metadata" "0")
     fi
 
     if [[ "$CONTAINER" == "mp4" || "$CONTAINER" == "m4v" || "$CONTAINER" == "mov" ]]; then
-        cmd+=" -map 0:v:0? -map 0:a:0?"
+        FFMPEG_CMD+=("-map" "0:v:0?" "-map" "0:a:0?")
     fi
 
-    cmd+=" \"$output_file\""
-
-    echo "$cmd"
+    FFMPEG_CMD+=("$output_file")
 }
 
 # ============================================
@@ -1793,17 +1891,18 @@ process_file() {
     get_file_info "$input_file"
     log "INFO" "Output: $output_file"
 
-    local cmd=$(build_ffmpeg_command "$input_file" "$output_file")
+    build_ffmpeg_command "$input_file" "$output_file"
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         echo -e "${YELLOW}[DRY RUN]${NC} FFmpeg command:" >&2
-        echo "$cmd"
+        printf '%q ' "${FFMPEG_CMD[@]}" >&2
+        echo >&2
         return 0
     fi
 
-    log "DEBUG" "Running: $cmd"
+    log "DEBUG" "Running: $(printf '%q ' "${FFMPEG_CMD[@]}")"
 
-    if eval "$cmd" >> "$LOG_FILE" 2>&1; then
+    if "${FFMPEG_CMD[@]}" >> "$LOG_FILE" 2>&1; then
         log "SUCCESS" "✓ Successfully converted: $input_file"
         if [[ -f "$output_file" ]]; then
             local size=$(du -h "$output_file" | cut -f1)
@@ -1844,7 +1943,6 @@ process_files() {
 
     local success_count=0
     local fail_count=0
-    local skip_count=0
     local start_time=$(date +%s)
 
     for file in "${files[@]}"; do
@@ -1881,11 +1979,10 @@ main() {
     print_banner
 
     # ------------------------------------------------------------------
-    # Parse arguments in a single pass.
-    #
-    # `to FORMAT` is handled HERE (inside the main loop) rather than as a
-    # pre-pass. That guarantees `-c CODEC` is applied before the format's
-    # default codec is resolved, and it lets us log the *actual* codec.
+    # Parse arguments in a single pass. `to FORMAT` is handled HERE
+    # (inside the main loop), so `-c CODEC` is applied before the
+    # format's default codec is resolved and the log reports the real
+    # codec.
     # ------------------------------------------------------------------
     local files=()
     local use_all_keyword=false
@@ -2014,7 +2111,6 @@ main() {
                 shift
                 ;;
             --all)
-                # Flag form of the `all` keyword
                 use_all_keyword=true
                 shift
                 ;;
@@ -2039,7 +2135,6 @@ main() {
                 exit 0
                 ;;
             to)
-                # `to FORMAT` — the format is the next argument.
                 shift
                 if [[ $# -eq 0 ]]; then
                     log "ERROR" "'to' must be followed by a format (e.g., 'to mp4')"
@@ -2059,9 +2154,6 @@ main() {
                 exit 1
                 ;;
             *)
-                # Positional `all` keyword: convert every video in cwd.
-                # Only treat the literal string "all" as the keyword if
-                # no file named "all" exists in the current directory.
                 if [[ "$1" == "all" && ! -f "all" ]]; then
                     use_all_keyword=true
                 else
@@ -2072,10 +2164,8 @@ main() {
         esac
     done
 
-    # ------------------------------------------------------------------
     # Apply format resolution AFTER all arguments are parsed, so that
     # `-c hevc` is never clobbered by the container's default codec.
-    # ------------------------------------------------------------------
     if [[ -n "$found_format" ]]; then
         if ! is_valid_output_format "$found_format"; then
             log "ERROR" "Invalid output format after 'to': $found_format"
@@ -2150,9 +2240,6 @@ main() {
     log "INFO" "=== Starting AMD GPU Batch Conversion v${VERSION} ==="
     log "INFO" "Log file: $LOG_FILE"
 
-    # ------------------------------------------------------------------
-    # `all` keyword expansion
-    # ------------------------------------------------------------------
     if [[ "$use_all_keyword" == "true" ]]; then
         log "INFO" "Scanning current directory for supported video files..."
         while IFS= read -r line; do
@@ -2161,21 +2248,12 @@ main() {
         log "INFO" "The 'all' keyword matched ${#files[@]} video file(s)"
     fi
 
-    # ------------------------------------------------------------------
-    # If no files given on the command line, fall back to scanning the
-    # current directory (same behaviour as `all`).
-    # ------------------------------------------------------------------
     if [[ ${#files[@]} -eq 0 ]] && [[ "$use_all_keyword" != "true" ]]; then
         while IFS= read -r line; do
             [[ -n "$line" ]] && files+=("$line")
         done < <(collect_all_videos_in_cwd)
     fi
 
-    # ------------------------------------------------------------------
-    # Filter out non-video files. This makes `./script.sh * to mp4` safe:
-    # the script itself, READMEs, .conf files, logs, and directories are
-    # quietly skipped instead of being fed to ffmpeg.
-    # ------------------------------------------------------------------
     if [[ "${NO_FILTER:-false}" != "true" ]] && [[ ${#files[@]} -gt 0 ]]; then
         local -a accepted_files=()
         local -a rejected_files=()
@@ -2195,7 +2273,6 @@ main() {
             done
         fi
 
-        # Safe empty-array assignment under set -u (bash < 4.4)
         if [[ ${#accepted_files[@]} -gt 0 ]]; then
             files=("${accepted_files[@]}")
         else
@@ -2270,12 +2347,6 @@ main() {
 
     process_files "${files[@]}"
 
-    # Not reached if process_files uses `set -e`-safe counter increments
-    # (it does, as of v1.1.11), so exit here with the proper status.
-    # We compute the status from the last conversion summary.
-    # Since process_files runs in the same shell (no subshell), any
-    # non-zero exit would already have aborted under `set -e`. We just
-    # exit 0 here; individual failures were logged.
     exit 0
 }
 
