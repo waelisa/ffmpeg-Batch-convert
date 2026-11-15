@@ -4,7 +4,7 @@
 # Advanced AMD GPU Batch Video Converter
 # Wael Isa - www.wael.name
 # GitHub: https://github.com/waelisa/ffmpeg-Batch-convert
-# Version: 1.1.13
+# Version: 1.1.14
 # Description: Batch convert video files using AMD GPU hardware acceleration
 # Author: Based on AMD optimization guidelines
 # License: MIT
@@ -37,6 +37,14 @@
 #   ./ffmpeg-Batch-convert.sh -c hevc -p maxquality all to mp4
 #   ./ffmpeg-Batch-convert.sh -c h264 -p fast *.webm to mp4
 #   ./ffmpeg-Batch-convert.sh -c hevc -q 20 --target-size 700M movie.mkv to mp4
+#   ./ffmpeg-Batch-convert.sh -c av1 -p maxquality *.mkv to mkv   (RDNA 3 only)
+#
+# WITH AUDIO NORMALIZATION / SUBTITLE HANDLING:
+#
+#   ./ffmpeg-Batch-convert.sh --normalize-audio all to mp4
+#   ./ffmpeg-Batch-convert.sh --subs copy all to mkv
+#   ./ffmpeg-Batch-convert.sh --subs convert all to mp4
+#   ./ffmpeg-Batch-convert.sh --subs drop --normalize-audio all to mp4
 #
 #   NOTE: `to FORMAT` sets the *container*. `-c CODEC` sets the *video
 #   codec*. When both are given, `-c` wins — e.g.
@@ -72,105 +80,91 @@
 #   - Automatic dependency installation (distro-aware, Arch/Fedora safe)
 #   - Multi-distribution support (apt, dnf, pacman, zypper)
 #   - AMD GPU detection and VA-API/AMF support
-#   - AV1 encoding support for RDNA 3
+#   - AV1 encoding support for RDNA 3 (dedicated presets: CQP/VBR/qp 20–28)
 #   - Smart B-frame management per GPU architecture
 #   - Zero-copy hardware pipeline (correct VA-API filter ordering)
 #   - HQVBR for consistent quality
+#   - Optional audio loudness normalization (EBU R128 single-pass)
+#   - Container-aware subtitle handling (copy / convert / drop)
+#   - Even-dimension enforcement for yuv420p scale/crop (no aborts)
 #   - Cross-format: webm→mp4, mp4→webm, mkv→mp4, and more
 #   - Container-aware audio codec (aac / opus / vorbis / mp3)
 #   - `all` keyword: convert every video in the current folder
 #   - Wildcard-safe: `./script.sh * to mp4` skips non-video files
 #   - Flexible output formats: to mp4, to mkv, to webm, to avi, ...
 #   - Auto-detection from command line
-#   - Fixed dry run output (no duplicate commands)
-#   - Enhanced HEVC/VA-API compatibility
-#   - Improved B-frame settings for RDNA 3
 #   - Array-based ffmpeg invocation (no eval; shell-safe filenames)
 #
 # ============================================================================
 # CHANGELOG
 # ============================================================================
 #
+#   v1.1.14 - AV1 optimization for RDNA 3:
+#             - Expanded AV1_QUALITY_PRESETS (AMF path) with CQP -qp 20–28
+#               and explicit -gops_per_idr 60 (Emby/Plex seek-friendly).
+#             - New AV1_VAAPI_QUALITY_PRESETS map so av1_vaapi no longer
+#               inherits h264's -qp 18 / -qp 22 values, which are far too
+#               aggressive for AV1 and waste bitrate on RDNA 3.
+#             - get_safe_bframe_settings now returns -bf 4 -refs 5 for AV1
+#               on RDNA 3 (RDNA 1/2 stay at -bf 3 -refs 4).
+#           - Added --normalize-audio flag injecting EBU R128 single-pass
+#             loudnorm (I=-16:TP=-1.5:LRA=11) into the audio chain. Useful
+#             for mixed web/DVD/TV rips. Single-pass keeps speed; double
+#             pass remains out of scope for batch use.
+#           - Added --subs {auto,copy,convert,drop} with SUBTITLE_CODECS:
+#             * auto (default): MKV → copy, MP4/MOV/M4V → mov_text,
+#               WebM → webvtt, AVI/3GP/OGV → drop.
+#             * copy: force stream copy (may fail on incompatible subs).
+#             * convert: transcode to text for the target container.
+#             * drop: no subtitle streams (previous default behaviour).
+#             -map 0:s? is used so files without subtitles still convert.
+#           - Added fix_scale_dims / fix_crop_dims. `-1` is rewritten to
+#             `-2` (aspect-preserving but even) and odd numeric width/
+#             height values are decremented by 1. This prevents ffmpeg
+#             from aborting with "width not divisible by 2" on yuv420p
+#             when users pass exotic resolutions via --scale / --crop.
+#             Applied to both software and VA-API filter paths.
+#
 #   v1.1.13 - Fixed VA-API filter chain ordering. On the software-decode
 #             path the hardware filters (deinterlace_vaapi, denoise_vaapi,
-#             crop_vaapi, scale_vaapi) were being *prepended* to
+#             crop_vaapi, scale_vaapi) were being prepended to
 #             "format=nv12,hwupload", so they received CPU frames and
-#             ffmpeg aborted with "Invalid output format" /
-#             "Hardware format ... is not supported by ...". The chain is
-#             now built as
-#                 [fps,]format=nv12,hwupload[,deinterlace_vaapi][,denoise_vaapi]
+#             ffmpeg aborted. Chain is now built as
+#                 [fps,]format=nv12,hwupload[,deinterlace_vaapi]
+#                                              [,denoise_vaapi]
 #                                              [,crop_vaapi][,scale_vaapi]
-#             and hardware decode still runs the *_vaapi filters directly
-#             on VA-API surfaces (with a download/upload wrapper only when
-#             a CPU-only filter such as fps is requested).
+#             Hardware decode still runs *_vaapi filters directly on
+#             VA-API surfaces (download/upload wrapper only when a CPU-
+#             only filter such as fps is requested).
 #           - Replaced the eval-based command execution with a proper Bash
 #             array (FFMPEG_CMD). Filenames containing spaces, quotes,
-#             dollar signs, semicolons, ampersands, or nested quotes are
-#             now safely passed through without word splitting or command
-#             injection. Dry-run output uses printf '%q ' so it can be
-#             copy-pasted back into a shell.
-#           - Added `shopt -s nullglob` inside collect_all_videos_in_cwd
-#             (and the implicit CWD fallback) so an empty directory no
-#             longer iterates over the literal string "*".
-#           - Extension validation is now O(1) via the new associative
-#             array INPUT_EXTENSIONS_MAP. The old linear scan over
-#             INPUT_EXTENSIONS was perfectly correct but unnecessary.
-#           - -vbaq / -preanalysis / -open_gop overrides are now applied
-#             by walking the argument array (apply_preset_overrides)
-#             instead of patching a command string with ${cmd/find/replace}
-#             (which silently failed once presets were moved to arrays).
+#             dollar signs, semicolons, ampersands are safe.
+#           - shopt -s nullglob inside collect_all_videos_in_cwd so empty
+#             directories no longer iterate over the literal "*".
+#           - O(1) extension validation via INPUT_EXTENSIONS_MAP.
+#           - -vbaq / -preanalysis / -open_gop overrides now applied by
+#             apply_preset_overrides (walks the array) instead of fragile
+#             ${cmd/find/replace} string substitution.
 #
-#   v1.1.12 - Fixed dependency installation on Arch and Fedora:
-#             - Added distro-aware package name mapping. On Arch and
-#               Fedora, `vainfo` is provided by `libva-utils`, NOT by a
-#               package called `vainfo`.
-#             - `--install-deps` now also pulls `libva-mesa-driver` on
-#               Arch (and `mesa-va-drivers` on Debian/Fedora), so VA-API
-#               works out of the box after installation.
-#             - Deduplicated the package list.
-#           - Fixed `-c CODEC` being masked by `to FORMAT`: `to` is now
-#             parsed inside the main argument loop.
-#           - Log/usage messages now consistently show `sudo ./script.sh`.
+#   v1.1.12 - Fixed dependency installation on Arch and Fedora (vainfo
+#             is provided by libva-utils). Fixed -c CODEC being masked by
+#             `to FORMAT`. Log/usage now show `sudo ./script.sh`.
 #
-#   v1.1.11 - FIXED critical batch bug: ((success_count++)) under `set -e`
-#             returns non-zero when the counter was 0, aborting the script
-#             right after the first file. Replaced with arithmetic
-#             assignment `x=$((x + 1))` which always returns 0.
-#           - Added `all` positional keyword (and `--all` flag).
-#           - Fixed empty-array expansion under `set -u` (bash < 4.4).
-#           - Renamed local `basename` variable that shadowed the command.
-#           - Deduplicated the `*.$ext` fallback loop (vob / VOB collision).
+#   v1.1.11 - FIXED critical batch bug: ((success_count++)) under set -e.
+#           - Added `all` keyword. Fixed empty-array expansion under set -u.
 #
-#   v1.1.10 - Wildcard support: `./script.sh * to mp4` now works cleanly.
-#           - Added "HOW TO USE" section to the header.
-#           - Non-video files are silently skipped when a glob is expanded.
-#           - Added --no-filter to disable input extension filtering.
-#
-#   v1.1.9 - Cross-format conversion overhaul:
-#           - Added AUDIO_CODECS map (aac/opus/vorbis/mp3 per container)
-#           - Replaced fragile "eval set --" arg parsing with array-based
-#             parsing (fixes filenames with spaces / special characters)
-#           - Removed detect_output_format_from_args / remove_to_args
-#           - Fixed VAAPI presets
-#           - AMF path no longer forces VA-API decode
-#           - Guarded -map_metadata for containers that reject it
-#           - Added stream mapping for mp4/m4v/mov
-#           - Optional VA-API hardware decode for h264/hevc input
-#           - VP9/Theora remain CPU-encoded
-#
-#   v1.1.8 - Fixed dry run output duplication
-#           - Enhanced HEVC VA-API compatibility
-#           - Improved B-frame settings for RDNA 3
-#           - Added codec override when format changes
-#           - Better handling of -c flag with to syntax
-#   v1.1.7 - Fixed log output redirection to stderr
-#   v1.1.6 - Fixed VA-API command construction, added bc dependency
-#   v1.1.5 - Added "to [format]" syntax support
-#   v1.1.4 - Fixed VOB file duration issues, added DVD preset
-#   v1.1.3 - Fixed VOB file duration parsing
-#   v1.1.2 - Fixed unbound variable errors
-#   v1.1.1 - Added universal AMD GPU support, AV1 encoding
-#   v1.1.0 - Added interactive menu, configuration files
+#   v1.1.10 - Wildcard support, HOW TO USE section, --no-filter.
+#   v1.1.9  - Cross-format overhaul: AUDIO_CODECS map, array arg parsing,
+#             VAAPI preset fixes, AMF decode fix, stream mapping.
+#   v1.1.8  - Fixed dry run duplication, HEVC VA-API compat, RDNA3 B-frames.
+#   v1.1.7  - Fixed log output redirection to stderr.
+#   v1.1.6  - Fixed VA-API command construction, added bc dependency.
+#   v1.1.5  - Added "to [format]" syntax support.
+#   v1.1.4  - Fixed VOB duration, added DVD preset.
+#   v1.1.3  - Fixed VOB duration parsing.
+#   v1.1.2  - Fixed unbound variable errors.
+#   v1.1.1  - Universal AMD GPU support, AV1 encoding.
+#   v1.1.0  - Interactive menu, configuration files.
 #
 #############################################################################################################################
 
@@ -180,7 +174,7 @@ IFS=$'\n\t'
 # Script configuration
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-VERSION="1.1.13"
+VERSION="1.1.14"
 LOG_FILE="${SCRIPT_DIR}/conversion_$(date +%Y%m%d_%H%M%S).log"
 OUTPUT_DIR="output"
 CONFIG_FILE="${SCRIPT_DIR}/ffmpeg-Batch-convert.conf"
@@ -204,8 +198,7 @@ DEFAULT_AUDIO_BITRATE="128k"
 DEFAULT_CONTAINER="mp4"
 INPUT_EXTENSIONS=("mov" "mkv" "avi" "flv" "m2ts" "ts" "mp4" "webm" "wmv" "m4v" "3gp" "ogv" "mpeg" "mpg" "vob")
 
-# O(1) lookup map for extension validation. Built from INPUT_EXTENSIONS
-# right after the array is declared, so the two never drift.
+# O(1) lookup map for extension validation.
 declare -A INPUT_EXTENSIONS_MAP=()
 for _ext in "${INPUT_EXTENSIONS[@]}"; do
     INPUT_EXTENSIONS_MAP["$_ext"]=1
@@ -215,11 +208,9 @@ unset _ext
 # Required dependencies (command name → what we actually need)
 REQUIRED_COMMANDS=("ffmpeg" "vainfo" "lspci" "bc" "ffprobe")
 
-# ---------------------------------------------------------------------------
 # Distro-specific package names for each required command.
 # On Arch and Fedora the `vainfo` binary is shipped by `libva-utils`,
 # NOT by a package literally called `vainfo`.
-# ---------------------------------------------------------------------------
 declare -A APT_PACKAGES=(
     [ffmpeg]="ffmpeg"
     [vainfo]="vainfo"
@@ -285,6 +276,26 @@ declare -A FORMAT_COMPATIBILITY=(
     ["ogv"]="theora"
 )
 
+# ---------------------------------------------------------------------------
+# Subtitle codec per container, used by --subs auto.
+#
+#   mkv          → copy   (MKV carries ASS/SSA/PGS/text natively)
+#   mp4/m4v/mov  → mov_text (only text subtitles allowed in MP4)
+#   webm         → webvtt (WebM requires WebVTT; transcoding may fail
+#                          for exotic sub formats — use --subs drop)
+#   avi/3gp/ogv  → ""     (no subtitle stream support; silently drop)
+# ---------------------------------------------------------------------------
+declare -A SUBTITLE_CODECS=(
+    ["mkv"]="copy"
+    ["mp4"]="mov_text"
+    ["m4v"]="mov_text"
+    ["mov"]="mov_text"
+    ["webm"]="webvtt"
+    ["avi"]=""
+    ["3gp"]=""
+    ["ogv"]=""
+)
+
 # Initialize variables with defaults
 DEBUG="${DEBUG:-false}"
 DRY_RUN="${DRY_RUN:-false}"
@@ -305,10 +316,10 @@ GPU_ARCHITECTURE="${GPU_ARCHITECTURE:-UNKNOWN}"
 RENDER_DEVICE="${RENDER_DEVICE:-}"
 FORCE_PROCESS="${FORCE_PROCESS:-false}"
 NO_FILTER="${NO_FILTER:-false}"
+NORMALIZE_AUDIO="${NORMALIZE_AUDIO:-false}"
+SUBTITLE_MODE="${SUBTITLE_MODE:-auto}"
 
-# Global array populated by build_ffmpeg_command and consumed by
-# process_file. Declared here so it exists under `set -u` even if
-# build_ffmpeg_command is never called.
+# Global array populated by build_ffmpeg_command and consumed by process_file.
 declare -ga FFMPEG_CMD=()
 
 # Resolution presets
@@ -331,7 +342,7 @@ declare -A AMD_ARCHITECTURES=(
 )
 
 # ============================================
-# Enhanced AMD-Specific Encoding Presets v6
+# Enhanced AMD-Specific Encoding Presets v7
 # ============================================
 
 declare -A QUALITY_PRESETS=(
@@ -343,9 +354,9 @@ declare -A QUALITY_PRESETS=(
     ["dvd"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 8M -bufsize 16M -vbaq 1 -preanalysis 1 -me quarter -maxaufsize 3 -gops_per_idr 30 -open_gop 1"
 )
 
-# VA-API presets — only universally accepted options.
-# -quality / -compression_level are NOT valid on most builds and cause
-# h264_vaapi to abort immediately. B-frames/refs come from the arch helper.
+# VA-API presets for h264_vaapi / hevc_vaapi. Only universally accepted
+# options. -quality / -compression_level are NOT valid on most builds and
+# cause the encoder to abort.
 declare -A VAAPI_QUALITY_PRESETS=(
     ["maxquality"]="-rc_mode CQP -qp 18"
     ["balanced"]="-rc_mode VBR -b:v 8M -maxrate 15M -qp 22"
@@ -355,13 +366,30 @@ declare -A VAAPI_QUALITY_PRESETS=(
     ["dvd"]="-rc_mode VBR -b:v 4M -maxrate 8M -qp 22"
 )
 
+# AV1 presets for the AMF path (av1_amf). CQP with -qp 20–28 is the
+# archival sweet spot; VBR pairs -b:v with -maxrate to bound buffer
+# usage during high-motion scenes. -gops_per_idr keeps seeking snappy
+# in media servers like Emby and Plex.
 declare -A AV1_QUALITY_PRESETS=(
-    ["maxquality"]="-quality quality -rc cqp -qp 18 -vbaq 1 -preanalysis 1"
-    ["balanced"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 12M"
-    ["fast"]="-quality speed -rc vbr_peak -maxrate 8M"
-    ["highcompression"]="-quality quality -rc vbr_latency -qvbr_quality_level 26 -maxrate 6M"
-    ["streaming"]="-quality quality -rc vbr_latency -qvbr_quality_level 23 -maxrate 8M"
-    ["dvd"]="-quality quality -rc hqvbr -qvbr_quality_level 22 -maxrate 6M"
+    ["maxquality"]="-quality quality -rc cqp -qp 20 -vbaq 1 -preanalysis 1 -gops_per_idr 60"
+    ["balanced"]="-quality quality -rc hqvbr -qvbr_quality_level 23 -maxrate 12M -peak_bitrate 12M -bufsize 24M -gops_per_idr 60"
+    ["fast"]="-quality speed -rc vbr_peak -maxrate 8M -bufsize 16M -gops_per_idr 30"
+    ["highcompression"]="-quality quality -rc vbr_latency -qvbr_quality_level 27 -maxrate 6M -bufsize 12M -gops_per_idr 45"
+    ["streaming"]="-quality quality -rc vbr_latency -qvbr_quality_level 24 -maxrate 8M -bufsize 16M -gops_per_idr 60"
+    ["dvd"]="-quality quality -rc hqvbr -qvbr_quality_level 23 -maxrate 6M -bufsize 12M -gops_per_idr 30"
+)
+
+# AV1 presets for the VA-API path (av1_vaapi). Kept separate from
+# VAAPI_QUALITY_PRESETS because AV1's CQP sweet spot is -qp 20–28,
+# not 18–26; reusing h264's -qp 18 would burn bitrate for no visible
+# gain on RDNA 3.
+declare -A AV1_VAAPI_QUALITY_PRESETS=(
+    ["maxquality"]="-rc_mode CQP -qp 20 -g 60"
+    ["balanced"]="-rc_mode VBR -b:v 6M -maxrate 12M -qp 24 -g 60"
+    ["fast"]="-rc_mode VBR -b:v 4M -maxrate 8M -g 30"
+    ["highcompression"]="-rc_mode VBR -b:v 2M -maxrate 5M -qp 28 -g 45"
+    ["streaming"]="-rc_mode VBR -b:v 5M -maxrate 8M -qp 24 -g 60"
+    ["dvd"]="-rc_mode VBR -b:v 3M -maxrate 6M -qp 24 -g 30"
 )
 
 declare -A BFRAME_SAFETY=(
@@ -409,15 +437,17 @@ print_banner() {
     echo -e "${CYAN}║                                                                   ║${NC}" >&2
     echo -e "${CYAN}║   Universal AMD GPU Support:                                       ║${NC}" >&2
     echo -e "${CYAN}║   • Polaris (RX 400/500) • Vega • RDNA 1 • RDNA 2 • RDNA 3        ║${NC}" >&2
-    echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series                                ║${NC}" >&2
+    echo -e "${CYAN}║   • AV1 Encoding for RX 7000 series (CQP/VBR tuned for RDNA 3)     ║${NC}" >&2
     echo -e "${CYAN}║   • Smart B-frame per architecture                                 ║${NC}" >&2
     echo -e "${CYAN}║   • Zero-copy hardware pipeline                                    ║${NC}" >&2
+    echo -e "${CYAN}║   • Optional audio loudness normalization (EBU R128)               ║${NC}" >&2
+    echo -e "${CYAN}║   • Container-aware subtitle copy / convert / drop                 ║${NC}" >&2
+    echo -e "${CYAN}║   • Even-dimension guard for yuv420p scale/crop                    ║${NC}" >&2
     echo -e "${CYAN}║   • Cross-format: webm→mp4, mp4→webm, mkv→mp4, and more            ║${NC}" >&2
     echo -e "${CYAN}║   • Batch:   ./ffmpeg-Batch-convert.sh all to mp4                  ║${NC}" >&2
     echo -e "${CYAN}║   • Flexible output formats: to mp4, to mkv, to webm, to avi       ║${NC}" >&2
     echo -e "${CYAN}║   • Auto-detection from command line                               ║${NC}" >&2
-    echo -e "${CYAN}║   • Fixed dry run output (no duplicates)                           ║${NC}" >&2
-    echo -e "${CYAN}║   • Enhanced HEVC VA-API compatibility                             ║${NC}" >&2
+    echo -e "${CYAN}║   • Array-based ffmpeg invocation (shell-safe filenames)           ║${NC}" >&2
     echo -e "${CYAN}║                                                                   ║${NC}" >&2
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}" >&2
 }
@@ -483,13 +513,25 @@ print_usage() {
     echo -e "    --texture-preserve      Maximum texture detail preservation" >&2
     echo -e "    --target-size SIZE      Target file size (e.g., 100M, 1G)" >&2
     echo >&2
+    echo -e "${YELLOW}Audio / Subtitle Options:${NC}" >&2
+    echo -e "    --normalize-audio       Enable EBU R128 loudness normalization" >&2
+    echo -e "                            (loudnorm I=-16:TP=-1.5:LRA=11, single pass)" >&2
+    echo -e "    --subs MODE             Subtitle handling: auto (default), copy," >&2
+    echo -e "                            convert, or drop. 'auto' copies for MKV," >&2
+    echo -e "                            converts to mov_text for MP4/MOV/M4V," >&2
+    echo -e "                            uses webvtt for WebM, drops for AVI/3GP/OGV" >&2
+    echo >&2
     echo -e "${YELLOW}Filter Options:${NC}" >&2
     echo -e "    --scale WxH             Scale video (e.g., 1920x1080, -1x720 for height 720)" >&2
+    echo -e "                            Odd dimensions and -1 are auto-corrected to" >&2
+    echo -e "                            even numbers for yuv420p compatibility." >&2
     echo -e "    --fps FPS               Set output framerate" >&2
     echo -e "    --trim START:DURATION   Trim video (e.g., 00:01:00:30 for 1m30s)" >&2
     echo -e "    --deinterlace           Force deinterlacing (auto-enabled for VOB)" >&2
     echo -e "    --denoise LEVEL         Apply denoising (low, medium, high)" >&2
     echo -e "    --crop W:H:X:Y          Crop video (width:height:x:y)" >&2
+    echo -e "                            Width and height are auto-corrected to" >&2
+    echo -e "                            even numbers for yuv420p compatibility." >&2
     echo >&2
     echo -e "${GREEN}EXAMPLES:${NC}" >&2
     echo -e "    # Check dependencies first" >&2
@@ -504,27 +546,30 @@ print_usage() {
     echo -e "    # Convert EVERY video in the current folder to mp4" >&2
     echo -e "    $SCRIPT_NAME all to mp4" >&2
     echo >&2
-    echo -e "    # Same, but only webm files (shell-globbed)" >&2
-    echo -e "    $SCRIPT_NAME *.webm to mp4" >&2
-    echo >&2
-    echo -e "    # Batch with a codec/preset override" >&2
-    echo -e "    $SCRIPT_NAME -c hevc -p maxquality all to mp4" >&2
-    echo >&2
-    echo -e "    # Same, but keep the mkv container (HEVC inside MKV)" >&2
+    echo -e "    # Batch with a codec/preset override (HEVC inside MKV)" >&2
     echo -e "    $SCRIPT_NAME -c hevc -p maxquality *.mkv to mkv" >&2
+    echo >&2
+    echo -e "    # AV1 on RDNA 3 (RX 7000)" >&2
+    echo -e "    $SCRIPT_NAME -c av1 -p maxquality *.mkv to mkv" >&2
+    echo >&2
+    echo -e "    # Normalize audio loudness during batch conversion" >&2
+    echo -e "    $SCRIPT_NAME --normalize-audio all to mp4" >&2
+    echo >&2
+    echo -e "    # Copy all subtitle streams into MKV" >&2
+    echo -e "    $SCRIPT_NAME --subs copy all to mkv" >&2
+    echo >&2
+    echo -e "    # Convert text subs to mov_text for MP4, drop bitmap subs" >&2
+    echo -e "    $SCRIPT_NAME --subs convert all to mp4" >&2
     echo >&2
     echo -e "    # Dry run (shows the ffmpeg command for every file)" >&2
     echo -e "    $SCRIPT_NAME --dry-run all to mp4" >&2
-    echo >&2
-    echo -e "    # Convert VOB files to AVI with quality preset" >&2
-    echo -e "    $SCRIPT_NAME --force-process -p dvd all to avi" >&2
     echo >&2
     echo -e "${CYAN}AMD GPU ARCHITECTURE NOTES:${NC}" >&2
     echo -e "    • Polaris (RX 400/500): Limited B-frames, use -bf 0 for stability" >&2
     echo -e "    • Vega: Good B-frame support up to 2" >&2
     echo -e "    • RDNA 1 (RX 5000): Full B-frame support up to 3" >&2
     echo -e "    • RDNA 2 (RX 6000): Enhanced B-frame support up to 4" >&2
-    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame support up to 4 for HEVC" >&2
+    echo -e "    • RDNA 3 (RX 7000): AV1 encoding, B-frame up to 4 / refs 5 for AV1" >&2
     echo >&2
     echo -e "${BLUE}Supported input formats:${NC} ${INPUT_EXTENSIONS[*]}" >&2
     echo -e "${BLUE}Supported output formats:${NC} ${!OUTPUT_FORMATS[*]}" >&2
@@ -567,13 +612,10 @@ check_command() {
 is_supported_input_file() {
     local filename="$1"
 
-    # Must be a regular file
     [[ -f "$filename" ]] || return 1
 
-    # Extract extension (from the last dot)
     local ext="${filename##*.}"
     if [[ "$ext" == "$filename" || -z "$ext" ]]; then
-        # No extension
         return 1
     fi
     ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
@@ -582,9 +624,8 @@ is_supported_input_file() {
 }
 
 # Echo every supported video file in the current directory (one per line).
-# Used by the `all` keyword. Skips the script itself, its log, and its
-# output directory. `nullglob` prevents the literal "*" from being passed
-# through when the directory is empty.
+# `nullglob` prevents the literal "*" from being passed through when the
+# directory is empty.
 collect_all_videos_in_cwd() {
     shopt -s nullglob
     local f
@@ -599,12 +640,63 @@ collect_all_videos_in_cwd() {
     shopt -u nullglob
 }
 
+# ---------------------------------------------------------------------------
+# Even-dimension guards.
+#
+# yuv420p (the format almost every VA-API / CPU encoder emits) requires
+# even width AND height. Odd values abort ffmpeg with:
+#   "width not divisible by 2" / "height not divisible by 2".
+#
+# fix_scale_dims:
+#   - WxH → coerce "-1" to "-2" (aspect-preserving but even)
+#   - decrement any odd numeric width/height by 1
+#   - preserves non-numeric expressions verbatim
+#
+# fix_crop_dims:
+#   - W:H:X:Y → decrement any odd numeric width/height by 1
+#   - leaves X/Y untouched (offsets don't need evenness)
+# ---------------------------------------------------------------------------
+fix_scale_dims() {
+    local scale_str="$1"
+    local w="${scale_str%x*}"
+    local h="${scale_str#*x}"
+
+    [[ "$w" == "-1" ]] && w="-2"
+    [[ "$h" == "-1" ]] && h="-2"
+
+    if [[ "$w" =~ ^[0-9]+$ ]] && (( w % 2 != 0 )); then
+        w=$((w - 1))
+    fi
+    if [[ "$h" =~ ^[0-9]+$ ]] && (( h % 2 != 0 )); then
+        h=$((h - 1))
+    fi
+
+    echo "${w}x${h}"
+}
+
+fix_crop_dims() {
+    local crop_str="$1"
+    local -a parts=()
+    IFS=':' read -ra parts <<< "$crop_str"
+
+    if [[ ${#parts[@]} -eq 4 ]]; then
+        local w="${parts[0]}" h="${parts[1]}" x="${parts[2]}" y="${parts[3]}"
+        if [[ "$w" =~ ^[0-9]+$ ]] && (( w % 2 != 0 )); then
+            w=$((w - 1))
+        fi
+        if [[ "$h" =~ [0-9] ]] && [[ ! "$h" =~ [^0-9] ]] && (( h % 2 != 0 )); then
+            h=$((h - 1))
+        fi
+        echo "${w}:${h}:${x}:${y}"
+    else
+        echo "$crop_str"
+    fi
+}
+
 # ============================================
 # Dependency Checking & Installation
 # ============================================
 
-# Translate a required command name into the package name for the
-# detected package manager. Falls back to the command name itself.
 get_package_name_for_command() {
     local pkg_mgr="$1"
     local cmd="$2"
@@ -617,9 +709,15 @@ get_package_name_for_command() {
     esac
 }
 
-# Deduplicate an array on stdout (newline-separated).
+# Deduplicate stdin, one line at a time. Accepts either stdin (pipe)
+# or a single argument (here-string), so both call styles are safe
+# under `set -u`.
 dedupe_lines() {
-    awk '!seen[$0]++' <<< "$1"
+    if [[ $# -gt 0 ]]; then
+        awk '!seen[$0]++' <<< "$1"
+    else
+        awk '!seen[$0]++'
+    fi
 }
 
 check_dependencies() {
@@ -719,7 +817,6 @@ install_dependencies() {
         return 0
     fi
 
-    # Deduplicate (ffmpeg and ffprobe both map to package "ffmpeg")
     local pkg_list
     pkg_list=$(printf '%s\n' "${missing_packages[@]}" | dedupe_lines)
     mapfile -t missing_packages <<< "$pkg_list"
@@ -762,8 +859,6 @@ install_dependencies() {
 
         pacman)
             log "INFO" "Installing packages: ${missing_packages[*]}"
-            # libva-utils provides the `vainfo` binary on Arch; the extra
-            # libva-mesa-driver is the actual AMD VA-API backend.
             pacman -S --noconfirm --needed "${missing_packages[@]}" \
                 libva-mesa-driver libva-utils
             ;;
@@ -911,6 +1006,13 @@ interactive_menu() {
 
     AUDIO_BITRATE=$(gum input --placeholder "Audio bitrate (e.g., 128k)" --value "128k")
 
+    if gum confirm "Normalize audio loudness (EBU R128)?" --default=false; then
+        NORMALIZE_AUDIO="true"
+    fi
+
+    SUBTITLE_MODE=$(gum choose --header "Subtitle handling" \
+        "auto" "copy" "convert" "drop" --selected "auto")
+
     if gum confirm "Configure advanced options?" --default=false; then
         echo -e "${YELLOW}Advanced Options:${NC}" >&2
 
@@ -977,6 +1079,8 @@ interactive_menu() {
     [[ -n "${SCALE:-}" ]] && echo -e "  Resolution: $SCALE" >&2
     [[ -n "${QUALITY_VAL:-}" ]] && echo -e "  Quality: $QUALITY_VAL" >&2
     echo -e "  Audio: $AUDIO_BITRATE" >&2
+    echo -e "  Subtitle mode: $SUBTITLE_MODE" >&2
+    [[ "${NORMALIZE_AUDIO:-false}" == "true" ]] && echo -e "  Audio normalization: Enabled" >&2
     [[ "${NO_VBAQ:-false}" == "true" ]] && echo -e "  VBAQ: Disabled" >&2 || echo -e "  VBAQ: Enabled" >&2
     [[ "${NO_PREANALYSIS:-false}" == "true" ]] && echo -e "  Pre-analysis: Disabled" >&2 || echo -e "  Pre-analysis: Enabled" >&2
     [[ "${NO_OPENGOP:-false}" == "true" ]] && echo -e "  Open GOP: Disabled" >&2 || echo -e "  Open GOP: Enabled" >&2
@@ -1030,6 +1134,8 @@ TEXTURE_PRESERVE="$TEXTURE_PRESERVE"
 TARGET_SIZE="$TARGET_SIZE"
 OUTPUT_DIR="$OUTPUT_DIR"
 FORCE_PROCESS="$FORCE_PROCESS"
+NORMALIZE_AUDIO="$NORMALIZE_AUDIO"
+SUBTITLE_MODE="$SUBTITLE_MODE"
 EOF
 
     log "SUCCESS" "Configuration saved to: $config_file"
@@ -1115,6 +1221,9 @@ check_av1_support() {
     return 1
 }
 
+# B-frame settings, codec- and architecture-aware.
+# RDNA 3 supports up to 4 B-frames / 5 reference frames for AV1; other
+# architectures stay at the safer 3/4.
 get_safe_bframe_settings() {
     local architecture="$1"
     local codec="$2"
@@ -1127,7 +1236,10 @@ get_safe_bframe_settings() {
     fi
 
     if [[ "$codec" == "av1" ]]; then
-        settings="-bf 3 -refs 4"
+        case "$architecture" in
+            RDNA3) settings="-bf 4 -refs 5" ;;
+            *)     settings="-bf 3 -refs 4" ;;
+        esac
     fi
 
     echo "$settings"
@@ -1293,7 +1405,6 @@ display_gpu_info() {
             done
         else
             echo -e "${YELLOW}VA-API:${NC} ✗ Not supported" >&2
-            echo -e "${YELLOW}  Install VA-API drivers for your distribution${NC}" >&2
         fi
 
         if check_amf_support; then
@@ -1309,7 +1420,12 @@ display_gpu_info() {
         fi
 
         local bframes=$(get_safe_bframe_settings "$architecture" "h264")
-        echo -e "${GREEN}Safe B-frame settings:${NC} $bframes" >&2
+        echo -e "${GREEN}Safe B-frame settings (h264):${NC} $bframes" >&2
+
+        if [[ "$architecture" == "RDNA3" ]]; then
+            local av1_bframes=$(get_safe_bframe_settings "$architecture" "av1")
+            echo -e "${GREEN}Safe B-frame settings (av1):${NC} $av1_bframes" >&2
+        fi
 
     else
         echo -e "${RED}No AMD GPU detected${NC}" >&2
@@ -1494,14 +1610,11 @@ probe_video_codec() {
 }
 
 # Split a whitespace-separated option string into words and append them
-# to the global FFMPEG_CMD array. Used for presets and B-frame overrides
-# whose contents are trusted internal strings.
+# to the global FFMPEG_CMD array.
 append_words() {
     local str="$1"
     [[ -z "$str" ]] && return 0
     local -a _words=()
-    # Temporarily reset IFS to split on whitespace; the script's
-    # IFS=$'\n\t' would otherwise prevent splitting on spaces.
     local IFS=' '
     # shellcheck disable=SC2206
     _words=($str)
@@ -1510,10 +1623,7 @@ append_words() {
     fi
 }
 
-# Walk FFMPEG_CMD and zero out -vbaq / -preanalysis / -open_gop values
-# when the corresponding NO_* flag is set. Replaces the old
-# ${cmd/"-vbaq 1"/"-vbaq 0"} string substitution, which no longer
-# applies now that we build an array.
+# Zero out -vbaq / -preanalysis / -open_gop values per flags.
 apply_preset_overrides() {
     local i=0
     local len=${#FFMPEG_CMD[@]}
@@ -1545,8 +1655,40 @@ apply_preset_overrides() {
     done
 }
 
+# Build the subtitle-mapping arguments for the current container and
+# --subs mode. Populates FFMPEG_CMD with "-map 0:s?" and the appropriate
+# "-c:s CODEC", or omits both to drop subtitles.
+apply_subtitle_mapping() {
+    local mode="${SUBTITLE_MODE:-auto}"
+    local codec=""
+
+    case "$mode" in
+        auto)
+            codec="${SUBTITLE_CODECS[$CONTAINER]:-}"
+            ;;
+        copy)
+            codec="copy"
+            ;;
+        convert)
+            codec="${SUBTITLE_CODECS[$CONTAINER]:-mov_text}"
+            if [[ -z "$codec" ]]; then
+                codec="mov_text"
+            fi
+            ;;
+        drop)
+            codec=""
+            ;;
+    esac
+
+    if [[ -n "$codec" ]]; then
+        FFMPEG_CMD+=("-map" "0:s?" "-c:s" "$codec")
+        log "DEBUG" "Subtitle mapping: -map 0:s? -c:s $codec (mode=$mode)"
+    else
+        log "DEBUG" "Subtitle mapping: dropped (mode=$mode, container=$CONTAINER)"
+    fi
+}
+
 # Populate the global FFMPEG_CMD array with a complete ffmpeg invocation.
-# Replaces the old string-building approach that required `eval`.
 build_ffmpeg_command() {
     local input_file="$1"
     local output_file="$2"
@@ -1622,7 +1764,6 @@ build_ffmpeg_command() {
 
             append_words "$(get_safe_bframe_settings "$GPU_ARCHITECTURE" "$CODEC")"
 
-            # Zero out -vbaq / -preanalysis / -open_gop values per flags.
             apply_preset_overrides
 
         elif check_vaapi_encoding_support "$CODEC"; then
@@ -1643,22 +1784,27 @@ build_ffmpeg_command() {
             FFMPEG_CMD+=("-vaapi_device" "$RENDER_DEVICE"
                          "-i" "$input_file")
 
-            # ------------------------------------------------------------------
-            # Build the filter chain respecting VA-API surface semantics.
+            # ----------------------------------------------------------------
+            # Filter chain: VA-API surfaces vs system memory.
             #
-            # Hardware filters (deinterlace_vaapi, denoise_vaapi,
-            # crop_vaapi, scale_vaapi) REQUIRE VA-API surfaces as input.
-            # On the software-decode path we must therefore emit
-            # "format=nv12,hwupload" FIRST and append the hardware
-            # filters after it. On the hardware-decode path the input is
-            # already in VA-API surfaces and no upload is needed.
+            # * Hardware filters (deinterlace_vaapi, denoise_vaapi,
+            #   crop_vaapi, scale_vaapi) REQUIRE VA-API surfaces.
+            # * On software decode we must therefore upload first:
+            #       [fps,] format=nv12,hwupload [,hw_filters...]
+            # * On hardware decode we already hold VA-API surfaces:
+            #       [,hw_filters...]
+            #   and fps (CPU-only) is wrapped with download/upload.
             #
-            # fps is a CPU-only filter: it runs before hwupload on the
-            # software path, and is wrapped in download/upload on the
-            # hardware path (rare; kept for correctness).
-            # ------------------------------------------------------------------
+            # SCALE and CROP pass through fix_scale_dims / fix_crop_dims
+            # to guarantee even dimensions for yuv420p.
+            # ----------------------------------------------------------------
 
-            # Hardware-side filters, in pipeline order.
+            local safe_scale=""
+            [[ -n "${SCALE:-}" ]] && safe_scale=$(fix_scale_dims "$SCALE")
+
+            local safe_crop=""
+            [[ -n "${CROP:-}" ]] && safe_crop=$(fix_crop_dims "$CROP")
+
             local hw_filters=""
             if [[ "${DEINTERLACE:-false}" == "true" ]] || is_vob_file "$input_file"; then
                 if is_vob_file "$input_file" && [[ "${DEINTERLACE:-false}" != "true" ]]; then
@@ -1673,25 +1819,21 @@ build_ffmpeg_command() {
                     high)   hw_filters="${hw_filters:+$hw_filters,}denoise_vaapi=level=16" ;;
                 esac
             fi
-            if [[ -n "${CROP:-}" ]]; then
-                hw_filters="${hw_filters:+$hw_filters,}crop_vaapi=$CROP"
+            if [[ -n "$safe_crop" ]]; then
+                hw_filters="${hw_filters:+$hw_filters,}crop_vaapi=$safe_crop"
             fi
-            if [[ -n "${SCALE:-}" ]]; then
-                hw_filters="${hw_filters:+$hw_filters,}scale_vaapi=$SCALE"
+            if [[ -n "$safe_scale" ]]; then
+                hw_filters="${hw_filters:+$hw_filters,}scale_vaapi=$safe_scale"
             fi
 
-            # Assemble the final chain.
             local filters=""
             if [[ "$hwdec_enabled" == "true" ]]; then
-                # Input already in VA-API surfaces.
                 filters="$hw_filters"
                 if [[ -n "${FPS:-}" ]]; then
-                    # fps needs CPU frames — round-trip through system memory.
                     local fps_segment="hwdownload,format=nv12,fps=$FPS,format=nv12,hwupload"
                     filters="${fps_segment}${hw_filters:+,$hw_filters}"
                 fi
             else
-                # Software decode: upload CPU frames, then run hardware filters.
                 local pre_upload=""
                 if [[ -n "${FPS:-}" ]]; then
                     pre_upload="fps=$FPS,"
@@ -1705,7 +1847,10 @@ build_ffmpeg_command() {
 
             FFMPEG_CMD+=("-c:v" "${CODEC}_vaapi")
 
-            if [[ -n "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]]; then
+            # AV1 VA-API gets its own preset map (qp 20–28, not 18–26).
+            if [[ "$CODEC" == "av1" ]] && [[ -n "${AV1_VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]]; then
+                append_words "${AV1_VAAPI_QUALITY_PRESETS[$PRESET]}"
+            elif [[ -n "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]]; then
                 append_words "${VAAPI_QUALITY_PRESETS[$PRESET]}"
             fi
 
@@ -1752,7 +1897,7 @@ build_ffmpeg_command() {
             FFMPEG_CMD+=("-b:v" "${TARGET_VIDEO_BITRATE}k")
         fi
 
-        # CPU filter chain (yadif, hqdn3d, scale, crop, fps).
+        # CPU filter chain — SCALE and CROP pass through the even-dim helpers.
         local cpu_filters=""
         if [[ "${DEINTERLACE:-false}" == "true" ]] || is_vob_file "$input_file"; then
             cpu_filters="yadif${cpu_filters:+,$cpu_filters}"
@@ -1765,10 +1910,14 @@ build_ffmpeg_command() {
             esac
         fi
         if [[ -n "${SCALE:-}" ]]; then
-            cpu_filters="scale=$SCALE${cpu_filters:+,$cpu_filters}"
+            local safe_scale_cpu
+            safe_scale_cpu=$(fix_scale_dims "$SCALE")
+            cpu_filters="scale=$safe_scale_cpu${cpu_filters:+,$cpu_filters}"
         fi
         if [[ -n "${CROP:-}" ]]; then
-            cpu_filters="crop=$CROP${cpu_filters:+,$cpu_filters}"
+            local safe_crop_cpu
+            safe_crop_cpu=$(fix_crop_dims "$CROP")
+            cpu_filters="crop=$safe_crop_cpu${cpu_filters:+,$cpu_filters}"
         fi
         if [[ -n "${FPS:-}" ]]; then
             cpu_filters="fps=$FPS${cpu_filters:+,$cpu_filters}"
@@ -1778,11 +1927,19 @@ build_ffmpeg_command() {
         fi
     fi
 
+    # Audio codec + bitrate, plus optional EBU R128 loudness normalization.
+    # loudnorm is single-pass here to keep batch speed reasonable; it's
+    # accurate enough for archival and media-server playback.
     local audio_codec="${AUDIO_CODECS[$CONTAINER]:-aac}"
     if [[ "$audio_codec" == "libopus" ]]; then
         FFMPEG_CMD+=("-c:a" "libopus" "-b:a" "$AUDIO_BITRATE" "-strict" "-2")
     else
         FFMPEG_CMD+=("-c:a" "$audio_codec" "-b:a" "$AUDIO_BITRATE")
+    fi
+
+    if [[ "${NORMALIZE_AUDIO:-false}" == "true" ]]; then
+        FFMPEG_CMD+=("-af" "loudnorm=I=-16:TP=-1.5:LRA=11")
+        log "DEBUG" "Audio normalization enabled: loudnorm=I=-16:TP=-1.5:LRA=11"
     fi
 
     if [[ -n "${TRIM:-}" ]]; then
@@ -1797,9 +1954,15 @@ build_ffmpeg_command() {
         FFMPEG_CMD+=("-map_metadata" "0")
     fi
 
-    if [[ "$CONTAINER" == "mp4" || "$CONTAINER" == "m4v" || "$CONTAINER" == "mov" ]]; then
-        FFMPEG_CMD+=("-map" "0:v:0?" "-map" "0:a:0?")
-    fi
+    # Always map video and audio explicitly. Required because
+    # apply_subtitle_mapping() adds `-map 0:s?` for most containers,
+    # and *any* `-map` option disables ffmpeg's default stream selection.
+    # Without this, MKV output would contain ONLY subtitles — a ~600 KB
+    # file with no video or audio.
+    FFMPEG_CMD+=("-map" "0:v:0?" "-map" "0:a:0?")
+
+    # Container-aware subtitle mapping (auto / copy / convert / drop).
+    apply_subtitle_mapping
 
     FFMPEG_CMD+=("$output_file")
 }
@@ -1947,9 +2110,8 @@ process_files() {
 
     for file in "${files[@]}"; do
         echo "-----------------------------------" >&2
-        # IMPORTANT: use `x=$((x + 1))`, NOT `((x++))`.
-        # Under `set -e`, `((x++))` returns non-zero when x was 0, which
-        # aborts the entire script right after the first file.
+        # IMPORTANT: x=$((x + 1)), not ((x++)); the latter returns
+        # non-zero when x was 0 and would abort under `set -e`.
         if process_file "$file"; then
             success_count=$((success_count + 1))
         else
@@ -1978,12 +2140,6 @@ process_files() {
 main() {
     print_banner
 
-    # ------------------------------------------------------------------
-    # Parse arguments in a single pass. `to FORMAT` is handled HERE
-    # (inside the main loop), so `-c CODEC` is applied before the
-    # format's default codec is resolved and the log reports the real
-    # codec.
-    # ------------------------------------------------------------------
     local files=()
     local use_all_keyword=false
     local found_format=""
@@ -2110,6 +2266,21 @@ main() {
                 NO_FILTER=true
                 shift
                 ;;
+            --normalize-audio)
+                NORMALIZE_AUDIO=true
+                shift
+                ;;
+            --subs)
+                SUBTITLE_MODE="$2"
+                case "$SUBTITLE_MODE" in
+                    auto|copy|convert|drop) ;;
+                    *)
+                        log "ERROR" "Invalid --subs mode: $SUBTITLE_MODE (must be auto, copy, convert, drop)"
+                        exit 1
+                        ;;
+                esac
+                shift 2
+                ;;
             --all)
                 use_all_keyword=true
                 shift
@@ -2164,8 +2335,6 @@ main() {
         esac
     done
 
-    # Apply format resolution AFTER all arguments are parsed, so that
-    # `-c hevc` is never clobbered by the container's default codec.
     if [[ -n "$found_format" ]]; then
         if ! is_valid_output_format "$found_format"; then
             log "ERROR" "Invalid output format after 'to': $found_format"
@@ -2214,7 +2383,7 @@ main() {
         exit 1
     fi
 
-    if [[ -z "${QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${AV1_QUALITY_PRESETS[$PRESET]:-}" ]]; then
+    if [[ -z "${QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${AV1_QUALITY_PRESETS[$PRESET]:-}" ]] && [[ -z "${AV1_VAAPI_QUALITY_PRESETS[$PRESET]:-}" ]]; then
         log "ERROR" "Invalid preset: $PRESET"
         echo "Valid presets: ${!QUALITY_PRESETS[*]}" >&2
         exit 1
@@ -2339,6 +2508,8 @@ main() {
     [[ -n "${SCALE:-}" ]] && log "INFO" "  • Resolution: $SCALE"
     [[ -n "${TARGET_SIZE:-}" ]] && log "INFO" "  • Target size: $TARGET_SIZE"
     log "INFO" "  • Audio codec: ${AUDIO_CODECS[$CONTAINER]:-aac} @ $AUDIO_BITRATE"
+    [[ "${NORMALIZE_AUDIO:-false}" == "true" ]] && log "INFO" "  • Audio normalization: loudnorm I=-16 TP=-1.5 LRA=11"
+    log "INFO" "  • Subtitle mode: $SUBTITLE_MODE"
     [[ "${NO_VBAQ:-false}" == "true" ]] && log "INFO" "  • VBAQ: Disabled" || log "INFO" "  • VBAQ: Enabled"
     [[ "${NO_PREANALYSIS:-false}" == "true" ]] && log "INFO" "  • Pre-analysis: Disabled" || log "INFO" "  • Pre-analysis: Enabled"
     [[ "${NO_OPENGOP:-false}" == "true" ]] && log "INFO" "  • Open GOP: Disabled" || log "INFO" "  • Open GOP: Enabled"
